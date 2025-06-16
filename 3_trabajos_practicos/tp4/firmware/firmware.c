@@ -61,22 +61,29 @@ void lcd_guardian_task(void *args){
 }
 
 void bmp_sense_task(void *args){
-    lcd_w_t bmp = {
+    lcd_w_t bmp_temp = {
         .str="--",
         .line = 0,
         .pos = 6
     };
-
+    lcd_w_t bmp_pres = {
+        .str="--",
+        .line = 1,
+        .pos = 6
+    };
+    
     uint32_t c = 0;
 
     while (1)
     {
         xSemaphoreTake(g_sI2c, portMAX_DELAY);
             printf("Sensar BMP\n");
-            sprintf(bmp.str, "%d", c);
+            sprintf(bmp_temp.str, "%d %cC", c, (char)223);
+            sprintf(bmp_pres.str, "%d Kpa", c);
         xSemaphoreGive(g_sI2c);
 
-        xQueueSend(g_qLcd, &bmp, portMAX_DELAY);
+        xQueueSend(g_qLcd, &bmp_temp, portMAX_DELAY);
+        xQueueSend(g_qLcd, &bmp_pres, portMAX_DELAY);
         c++;
         vTaskDelay(pdMS_TO_TICKS(SAMPLE_TIME));
     }    
