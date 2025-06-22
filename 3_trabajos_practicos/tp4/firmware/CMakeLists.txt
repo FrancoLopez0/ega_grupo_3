@@ -55,6 +55,7 @@ target_link_libraries(
         freertos
         lcd
         bmp280
+        hardware_pwm
         )
 
 # Add the standard include files to the build
