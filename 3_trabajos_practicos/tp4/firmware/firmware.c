@@ -22,7 +22,7 @@
 
 #define PWM_WRAP        4096
 
-#define SET_POINT       25
+#define SET_POINT       24
 #define KP              PWM_WRAP/SET_POINT
 
 typedef enum
