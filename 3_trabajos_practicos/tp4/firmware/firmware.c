@@ -7,8 +7,8 @@
 #include "semphr.h"
 #include "queue.h"
 
-#define SDA_PIN         4U
-#define SCL_PIN         5U
+#define SDA_PIN         16U
+#define SCL_PIN         17U
 #define LCD_DIR         0x27 
 #define I2C_FREQ        100000
 
@@ -18,11 +18,11 @@
 #define SAMPLE_TIME_MS  500
 
 #define BTN_PIN         14
-#define LED_PIN         13
+#define LED_PIN         15
 
 #define PWM_WRAP        4096
 
-#define SET_POINT       24
+#define SET_POINT       25
 #define KP              PWM_WRAP/SET_POINT
 
 typedef enum
@@ -46,9 +46,9 @@ typedef struct
 
 menu_t g_menu = pres_temp_menu;
 
-SemaphoreHandle_t g_sI2c, g_qBmp_values;
+SemaphoreHandle_t g_sI2c, g_sBtn;
 
-QueueHandle_t g_qLcd;
+QueueHandle_t g_qLcd, g_qBmp_values;
 
 void IRQ_btn(uint gpio, uint32_t events){
 
@@ -56,11 +56,7 @@ void IRQ_btn(uint gpio, uint32_t events){
     
     gpio_set_irq_enabled(BTN_PIN, GPIO_IRQ_EDGE_FALL,false);
 
-    uint32_t last_time = get_absolute_time();
-    uint32_t now_time = last_time;
-    while(now_time - last_time < (100e3)){
-        now_time = get_absolute_time();
-    }
+    xSemaphoreTakeFromISR(g_sBtn, xHigherPriorityTaskWoken);
 
     g_menu = (g_menu + 1)%2;    
 
@@ -122,7 +118,24 @@ void i2c_config(void){
     gpio_pull_up(SCL_PIN);
 }
 
-void lcd_guardian_task(void *args){
+// void lcd_guardian_task(void *args){
+    
+//     lcd_w_t w;
+    
+//     while(1){
+//         if(xQueueReceive(g_qLcd, &w, portMAX_DELAY)){
+//             xSemaphoreTake(g_sI2c, portMAX_DELAY);
+//                 lcd_set_cursor(w.line, w.pos);
+//                 if(w.str[0] == '\r'){
+//                     lcd_clear();
+//                 }
+//                 lcd_string(w.str);
+//             xSemaphoreGive(g_sI2c);
+//         }
+//     }
+// }
+
+void lcd_task(void *args){
     
     lcd_w_t w;
     
@@ -134,6 +147,7 @@ void lcd_guardian_task(void *args){
                     lcd_clear();
                 }
                 lcd_string(w.str);
+                xSemaphoreTake(g_sBtn, 0);
             xSemaphoreGive(g_sI2c);
         }
     }
@@ -225,6 +239,8 @@ int main()
     g_qBmp_values = xQueueCreate(BUFF_SIZE_BMP, sizeof(bmp_t));
 
     g_sI2c = xSemaphoreCreateMutex();
+    g_sBtn = xSemaphoreCreateBinary();
+
     
     gpio_config();
     
@@ -234,7 +250,7 @@ int main()
     lcd_init(i2c0, LCD_DIR);
 
     xTaskCreate(
-        lcd_guardian_task,
+        lcd_task,
         "LCD Task",
         configMINIMAL_STACK_SIZE*2,
         NULL,
