@@ -28,39 +28,42 @@ set(PICO_BOARD pico2_w CACHE STRING "Board type")
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
-project(ega_grupo_3 C CXX ASM)
+project(firmware C CXX ASM)
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(ega_grupo_3 ega_grupo_3.c )
+add_executable(firmware firmware.c )
 
 # Agrega el subdirectorio con tus módulos
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../freertos ${CMAKE_BINARY_DIR}/freertos)
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/modules/temt6000)
 
-pico_set_program_name(ega_grupo_3 "ega_grupo_3")
-pico_set_program_version(ega_grupo_3 "0.1")
+pico_set_program_name(firmware "firmware")
+pico_set_program_version(firmware "0.1")
 
 # Modify the below lines to enable/disable output over UART/USB
-pico_enable_stdio_uart(ega_grupo_3 0)
-pico_enable_stdio_usb(ega_grupo_3 1)
+pico_enable_stdio_uart(firmware 0)
+pico_enable_stdio_usb(firmware 1)
 
 # Add the standard library to the build
-target_link_libraries(ega_grupo_3
+target_link_libraries(firmware
         pico_stdlib
         )
 
 # Add the standard include files to the build
-target_include_directories(ega_grupo_3 PRIVATE
+target_include_directories(firmware PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
 )
 
 # Add any user requested libraries
-target_link_libraries(ega_grupo_3 
+target_link_libraries(firmware 
         temt6000
+        freertos
+        hardware_adc
         )
 
-pico_add_extra_outputs(ega_grupo_3)
+pico_add_extra_outputs(firmware)
 
