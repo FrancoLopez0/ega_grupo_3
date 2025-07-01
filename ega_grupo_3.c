@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include "pico/stdlib.h"
-
-
+#include "tmt6000.h"
 
 int main()
 {
