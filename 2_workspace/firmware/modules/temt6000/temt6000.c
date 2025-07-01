@@ -21,7 +21,7 @@ void temt6000_init(uint8_t pin, uint8_t chann){
  * @return float voltaje
  */
 float adc_get_voltage(uint16_t adc_raw){
-    return (float)adc_raw * g_conversion_factor;
+    return (float)adc_raw * (3.3f / (1 << 12));
 }
 
 /**
@@ -31,7 +31,7 @@ float adc_get_voltage(uint16_t adc_raw){
  * @return float corriente sobre la resistencia de sensado
  */
 float temt6000_get_current(float voltage){
-    return voltage/RESISTOR;
+    return (voltage/RESISTOR)*1000;
 }
 
 /**
@@ -41,7 +41,8 @@ float temt6000_get_current(float voltage){
  */
 float temt6000_get_lux(void){
     uint16_t adc_raw = adc_read(); // TODO: Posible mejora usar el fifo y obtener una medicion mas estable o utilizar un filtro
-    float voltage = adc_get_voltage(adc_raw);
-    float current = temt6000_get_current(voltage);
-    return current * DEFAULT_CTE_LUX;
+    // float voltage = adc_get_voltage(adc_raw);
+    // float current = temt6000_get_current(voltage);
+    // return current * DEFAULT_CTE_LUX;
+    return 330.0 * ((float)adc_raw / 4095.0);
 }
