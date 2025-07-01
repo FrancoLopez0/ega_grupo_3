@@ -1,4 +1,4 @@
-#define DEFAULT_CTE_LUX 0.5f
+#define DEFAULT_CTE_LUX 2.0f
 #define RESISTOR        10e3f
 #define ADC_RESOLUTION  4096
 #define V_REF           3.3f
