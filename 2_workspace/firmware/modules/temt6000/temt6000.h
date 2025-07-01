@@ -4,3 +4,4 @@
 #define V_REF           3.3f
 
 #include "pico/stdlib.h"
+#include "hardware/adc.h"

@@ -30,15 +30,15 @@ include(pico_sdk_import.cmake)
 
 project(ega_grupo_3 C CXX ASM)
 
-# Agrega el subdirectorio con tus módulos
-add_subdirectory(modules/tmt6000)
-
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
 add_executable(ega_grupo_3 ega_grupo_3.c )
+
+# Agrega el subdirectorio con tus módulos
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/modules/temt6000)
 
 pico_set_program_name(ega_grupo_3 "ega_grupo_3")
 pico_set_program_version(ega_grupo_3 "0.1")
@@ -50,7 +50,6 @@ pico_enable_stdio_usb(ega_grupo_3 1)
 # Add the standard library to the build
 target_link_libraries(ega_grupo_3
         pico_stdlib
-        tmt6000
         )
 
 # Add the standard include files to the build
@@ -60,7 +59,7 @@ target_include_directories(ega_grupo_3 PRIVATE
 
 # Add any user requested libraries
 target_link_libraries(ega_grupo_3 
-        
+        temt6000
         )
 
 pico_add_extra_outputs(ega_grupo_3)
