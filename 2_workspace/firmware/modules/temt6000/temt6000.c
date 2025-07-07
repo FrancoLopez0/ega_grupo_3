@@ -44,5 +44,5 @@ float temt6000_get_lux(void){
     // float voltage = adc_get_voltage(adc_raw);
     // float current = temt6000_get_current(voltage);
     // return current * DEFAULT_CTE_LUX;
-    return 330.0 * ((float)adc_raw / 4095.0);
+    return 3300.0 * ((float)adc_raw / 4095.0);
 }

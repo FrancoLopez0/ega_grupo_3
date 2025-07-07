@@ -3,7 +3,7 @@
 #include "string.h"
 
 #define MAX_SP          100
-#define MAX_LUX         10000
+#define MAX_LUX         1500
 #define OLED_ADDR       0x3C
 
 #define DEFAULT_BAR {.x = 0,.y = 7,.h = 10,.w = 128,.percent = 0}
