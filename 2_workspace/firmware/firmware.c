@@ -25,13 +25,23 @@
 #define PIN_TEMT6000    28
 #define CHANN_TEMT6000  2
 
+#define MAX_SET_POINT 1000
+#define PWM_WRAP      4096
+
+#define SELECT_BTN 15
+
 #define BUFF_SIZE 100
-#define SAMPLE_RATE 10
+#define SAMPLE_RATE 800
 #define PERIOD_RATE 1000/SAMPLE_RATE
 #define ADC_CLK_BASE 48000000.f
 #define CONVERSION_FACTOR 3.3f / (1 << 12)
 
-QueueHandle_t q_lux_values, q_raw_adc_values;
+#define BH1750_SAMPLE_TIME_MS 120
+
+#define MAX_COUNT 100
+
+QueueHandle_t q_raw_adc_values, q_values_to_show;
+QueueHandle_t q_send_uart;
 SemaphoreHandle_t semphr_i2c;
 ssd1306_t oled;
 
@@ -42,104 +52,110 @@ user_t user = {
     .select = set_sp
 };
 
-void moving_average_filter(float* buffer, int buff_size, float* sum, int* index, float new_value, float* avg) {
-    // Obtener el índice del valor más antiguo antes de actualizar el buffer
-    int old_index = *index;
-
-    // Restar el valor antiguo del buffer de la suma acumulada
-    *sum -= buffer[old_index];
-
-    // Agregar el nuevo valor al buffer y actualizar la suma acumulada
-    buffer[old_index] = new_value;
-    *sum += new_value;
-
-    // Avanzar el índice circularmente
-    *index = (old_index + 1) % buff_size;
-
-    // Calcular la nueva media
-    *avg = *sum / buff_size;
-}
-
-void get_filtered(float new_sample, float *value_filtered,float *samples, int size_samples, float *accumulator,int *buff_index,bool *is_not_full)
-{
-	if(*is_not_full)
-	{
-		samples[*buff_index] = new_sample;
-		*accumulator+=samples[*buff_index];
-
-		*value_filtered = new_sample;
-
-		(*buff_index)++;
-
-		if(*buff_index == size_samples)
-		{
-			*buff_index = 0;
-
-			*is_not_full = false;
-		}
-	}
-	else{
-		moving_average_filter(samples, size_samples, accumulator, buff_index, new_sample, value_filtered);
-	}
-}
-
 /**
- * @brief Tarea que se encarga de controlar el led
+ * @brief Tarea que controla la luminosidad del Led y envia los datos a graficar
  * 
  * @param params 
  */
-void control_task(void *params){
-    float lux_raw_adc = 0, lux = 0, lux_raw_adc_acumul = 0;
-    int index_raw_adc_buff=0;
-    bool is_not_full = 0;
+void central_task(void *params){
+    // Control
+    int pwm;
+    float lux = 0.0f;
+    float lux_temt6000 = 0.0f;
+    float lux_bh1750 = 0.0f;
+    float prev_lux = 0.0f;
+    float error;
+    float kp = 0.1;
+    float h = MAX_SET_POINT / PWM_WRAP;
 
-    float lux_raw_adc_buff[10];
-
-    for(;;){    
-        if(xQueueReceive(q_lux_values, &lux_raw_adc, portMAX_DELAY)){
-
-            get_filtered(lux_raw_adc, &lux, lux_raw_adc_buff, 10, &lux_raw_adc_acumul, &index_raw_adc_buff, &is_not_full);
-
-            user.lux = lux_raw_adc;
-            ui_update(&oled, &user);
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-}
-
-/**
- * @brief Tarea que se encarga de procesar los datos
- * 
- */
-void get_lux_task(void *params){
-    adc_run(true);
+    // Filtrado
+    const float alpha = 0.414;
+    float set_point;
     uint16_t raw_adc_values;
-    float lux = 0;
+    uint8_t c = 0;
+    uint8_t samples = 0;
+
+    float coef_fusion = 0.3f;
+
+    adc_run(true);
+
     for(;;){
         if(xQueueReceive(q_raw_adc_values, &raw_adc_values, portMAX_DELAY)){
-            lux = 3300.0 * ((float)raw_adc_values / 4095.0);
-            xQueueSend(q_lux_values, &lux, portMAX_DELAY);
 
-            // xSemaphoreTake(semphr_i2c, portMAX_DELAY);
+            if(samples == 120){
+                xSemaphoreTake(semphr_i2c, portMAX_DELAY);
+                    lux_bh1750 = bh1750_read_lux();
+                xSemaphoreGive(semphr_i2c);
+                samples = 0;
+            }
 
-            // xSemaphoreGive(semphr_i2c, portMAX_DELAY);
+            lux_temt6000 = temt6000_get_lux(raw_adc_values);
 
-            vTaskDelay(10);
+            lux = lux_temt6000 * coef_fusion + lux_bh1750 * (1.0f - coef_fusion);
+
+            // lux = alpha * lux + (1.0f - alpha) * prev_lux; // Mejorar usando filtro fir con CMSIS DSP
+            
+            prev_lux = lux;
+
+            error = set_point - lux;
+    
+            pwm += kp * error * h;
+
+            c++;
+            samples++;
+
+            xQueueSend(q_send_uart, &lux, portMAX_DELAY);
+
+            if(c==MAX_COUNT){ // Cada una cierta cantidad de muestras enviare la muestra a la tarea que se encarga de la ui
+                c = 0;
+                xQueueSend(q_values_to_show, &lux, portMAX_DELAY);
+            }
+
+            adc_irq_set_enabled(true);
+            adc_run(true);
+            vTaskDelay(pdMS_TO_TICKS(1)); // Se espera una distancia entre muestras de 1.3ms
         }
     }
 }
 
+void send_uart_task(void *params){
+    float serial_value;
+    for(;;){
+        if(xQueueReceive(q_send_uart,&serial_value, portMAX_DELAY)){
+            printf("%.2f\n", serial_value);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
 /**
- * @brief Tarea que se encarga de leer el valor del ADC
+ * @brief Muestra y maneja la interfaz de usuario
  * 
  * @param params 
  */
-void enable_adc_fifo_task(void *params){
-    assert(PERIOD_RATE>=1);
+void ui_task(void *params){
+    float lux = 0;
     for(;;){
-        adc_irq_set_enabled(true);
-        adc_run(true);
-        vTaskDelay(pdMS_TO_TICKS(PERIOD_RATE));
+        if(xQueueReceive(q_values_to_show, &lux, portMAX_DELAY)){
+            user.lux = lux;
+            
+            xSemaphoreTake(semphr_i2c, portMAX_DELAY);
+                ui_update(&oled, &user);
+            xSemaphoreGive(semphr_i2c);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+/**
+ * @brief Interrupcion que maneja el boton de seleccion
+ * 
+ */
+void IRQ_BTN(void){
+
+    if(gpio_get_irq_event_mask(SELECT_BTN) & GPIO_IRQ_EDGE_FALL){
+        gpio_acknowledge_irq(SELECT_BTN, GPIO_IRQ_EDGE_FALL);
+        user.select = (user.select + 1) % not_show; // Cambio el modo de seleccion
     }
 }
 
@@ -154,7 +170,7 @@ void IRQ_ReadAdcFifo(){
     adc_fifo_drain();
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     xQueueSendFromISR(q_raw_adc_values, &adc_raw_values, &xHigherPriorityTaskWoken);
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);                                          // Cambio el contexto del Scheduler para que ejecute la tarea de procesamiento
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);                                         
 }
 
 /**
@@ -199,7 +215,8 @@ int main() {
     stdio_init_all();
 
     q_raw_adc_values = xQueueCreate(BUFF_SIZE, sizeof(uint16_t));
-    q_lux_values = xQueueCreate(BUFF_SIZE, sizeof(float));
+    q_values_to_show = xQueueCreate(BUFF_SIZE, sizeof(float));
+    q_send_uart = xQueueCreate(BUFF_SIZE, sizeof(float));
 
     semphr_i2c = xSemaphoreCreateMutex();
 
@@ -213,29 +230,29 @@ int main() {
     uint8_t c = 0;
 
     xTaskCreate(
-        control_task,
-        "control_task",
-        configMINIMAL_STACK_SIZE*2,
+        central_task,
+        "central_task",
+        configMINIMAL_STACK_SIZE,
         NULL,
         tskIDLE_PRIORITY + 2,
         NULL
     );
 
     xTaskCreate(
-        get_lux_task,
-        "get_lux_task",
+        send_uart_task,
+        "send_uart_task",
+        configMINIMAL_STACK_SIZE*2,
+        NULL,
+        tskIDLE_PRIORITY * 1,
+        NULL
+    );
+
+    xTaskCreate(
+        ui_task,
+        "ui_task",
         configMINIMAL_STACK_SIZE,
         NULL,
         tskIDLE_PRIORITY + 1,
-        NULL
-    );
-
-    xTaskCreate(
-        enable_adc_fifo_task,
-        "enable_adc_fifo_task",
-        configMINIMAL_STACK_SIZE,
-        NULL,
-        tskIDLE_PRIORITY + 2,
         NULL
     );
 

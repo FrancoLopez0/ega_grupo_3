@@ -39,8 +39,7 @@ float temt6000_get_current(float voltage){
  * @param voltage
  * @return float lux
  */
-float temt6000_get_lux(void){
-    uint16_t adc_raw = adc_read(); // TODO: Posible mejora usar el fifo y obtener una medicion mas estable o utilizar un filtro
+float temt6000_get_lux(uint16_t adc_raw){
     // float voltage = adc_get_voltage(adc_raw);
     // float current = temt6000_get_current(voltage);
     // return current * DEFAULT_CTE_LUX;
