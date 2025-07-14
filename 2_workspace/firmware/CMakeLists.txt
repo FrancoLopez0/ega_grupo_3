@@ -67,6 +67,7 @@ target_link_libraries(firmware
         bh1750
         freertos
         hardware_adc
+        hardware_pwm
         pico_cyw43_arch_none
         )
 

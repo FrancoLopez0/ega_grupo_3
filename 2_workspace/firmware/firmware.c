@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
+#include "hardware/pwm.h"
 #include "pico/cyw43_arch.h"
 
 #include "modules/temt6000/temt6000.h"
@@ -31,11 +32,14 @@
 
 #define SELECT_BTN 20
 
-#define BUFF_SIZE 100
+#define BUFF_SIZE   100
 #define SAMPLE_RATE 800
 #define PERIOD_RATE 1000/SAMPLE_RATE
 #define ADC_CLK_BASE 48000000.f
 #define CONVERSION_FACTOR 3.3f / (1 << 12)
+
+#define PIN_PWM 1
+#define PWM_CLK 100000
 
 #define BH1750_SAMPLE_TIME_MS 120
 
@@ -47,7 +51,7 @@ SemaphoreHandle_t semphr_i2c;
 ssd1306_t oled;
 
 user_t user = {
-    .sp = MAX_SP/2,
+    .sp = 1000,
     .mode = true,
     .lux = MAX_LUX/2,
     .select = set_sp
@@ -71,7 +75,7 @@ void central_task(void *params){
 
     // Filtrado
     const float alpha = 0.414;
-    float set_point;
+    float set_point = user.sp;
     float coef_fusion = 0.3f;
     uint16_t raw_adc_values;
     uint8_t c = 0;
@@ -98,8 +102,12 @@ void central_task(void *params){
             prev_lux = lux;
 
             error = set_point - lux;
-    
-            pwm += kp * error * h;
+            
+            if(error*error<20*20){
+                pwm += kp * error * h;
+            }
+
+            pwm_set_gpio_level(PIN_PWM, (uint16_t)pwm);
 
             c++;
             samples++;
@@ -198,13 +206,16 @@ void IRQ_ReadAdcFifo(){
  */
 void i2c_config(void){
     i2c_init(I2C_PORT, I2C_FREQ);
-    
     gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
     gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);
     gpio_pull_up(I2C_SDA);
     gpio_pull_up(I2C_SCL);
 }
 
+/**
+ * @brief Configura el boton de seleccion
+ * 
+ */
 void btns_config(void){
     gpio_init(SELECT_BTN);
     gpio_set_dir(SELECT_BTN, GPIO_IN);
@@ -215,6 +226,32 @@ void btns_config(void){
         true,
         &IRQ_BTN
     );
+}
+
+/**
+ * @brief Configura el controlador del pwm
+ * 
+ * @param pin 
+ * @param clk 
+ * @return uint 
+ */
+uint config_pwm(uint16_t pin, float clk){
+
+    gpio_set_function(pin, GPIO_FUNC_PWM);
+
+    uint slice_num = pwm_gpio_to_slice_num(pin);
+
+    pwm_config config = pwm_get_default_config();
+
+    // pwm_config_set_wrap(&config, 4096U);
+    
+    pwm_config_set_clkdiv(&config, 1.25f);
+    
+    pwm_init(slice_num, &config, true);
+    
+    pwm_set_wrap(slice_num, 4096U);
+    
+    return slice_num;
 }
 
 /**
@@ -255,6 +292,9 @@ int main() {
     i2c_config();
     bh1750_init();
     btns_config();
+    config_pwm(PIN_PWM, PWM_CLK);
+
+    pwm_set_gpio_level (PIN_PWM, 2000);
 
     if (cyw43_arch_init()) {
         printf("Wi-Fi init failed\n");

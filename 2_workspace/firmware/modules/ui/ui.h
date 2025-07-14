@@ -2,7 +2,7 @@
 #include "stdio.h"
 #include "string.h"
 
-#define MAX_SP          100
+#define MAX_SP          600
 #define MAX_LUX         1500
 #define OLED_ADDR       0x3C
 
