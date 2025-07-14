@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
+#include "pico/cyw43_arch.h"
 
 #include "modules/temt6000/temt6000.h"
 #include "modules/bh1750/bh1750.h"
@@ -28,7 +29,7 @@
 #define MAX_SET_POINT 1000
 #define PWM_WRAP      4096
 
-#define SELECT_BTN 15
+#define SELECT_BTN 20
 
 #define BUFF_SIZE 100
 #define SAMPLE_RATE 800
@@ -71,11 +72,10 @@ void central_task(void *params){
     // Filtrado
     const float alpha = 0.414;
     float set_point;
+    float coef_fusion = 0.3f;
     uint16_t raw_adc_values;
     uint8_t c = 0;
     uint8_t samples = 0;
-
-    float coef_fusion = 0.3f;
 
     adc_run(true);
 
@@ -93,7 +93,7 @@ void central_task(void *params){
 
             lux = lux_temt6000 * coef_fusion + lux_bh1750 * (1.0f - coef_fusion);
 
-            // lux = alpha * lux + (1.0f - alpha) * prev_lux; // Mejorar usando filtro fir con CMSIS DSP
+            lux = alpha * lux + (1.0f - alpha) * prev_lux; // Mejorar usando filtro fir con CMSIS DSP
             
             prev_lux = lux;
 
@@ -104,7 +104,7 @@ void central_task(void *params){
             c++;
             samples++;
 
-            xQueueSend(q_send_uart, &lux, portMAX_DELAY);
+            // xQueueSend(q_send_uart, &lux, portMAX_DELAY); // Envio el valor de lux a la tarea que envia por UART
 
             if(c==MAX_COUNT){ // Cada una cierta cantidad de muestras enviare la muestra a la tarea que se encarga de la ui
                 c = 0;
@@ -118,6 +118,11 @@ void central_task(void *params){
     }
 }
 
+/**
+ * @brief Envia los datos por UART
+ * 
+ * @param params 
+ */
 void send_uart_task(void *params){
     float serial_value;
     for(;;){
@@ -135,13 +140,30 @@ void send_uart_task(void *params){
  */
 void ui_task(void *params){
     float lux = 0;
+    float top_limit_lux = MAX_LUX-500;
+    float bottom_limit_lux = 100;
+    uint8_t c = 0;
     for(;;){
         if(xQueueReceive(q_values_to_show, &lux, portMAX_DELAY)){
             user.lux = lux;
+
+            if(top_limit_lux < lux){
+                cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+            }
+            else{
+                cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+            }
             
             xSemaphoreTake(semphr_i2c, portMAX_DELAY);
                 ui_update(&oled, &user);
             xSemaphoreGive(semphr_i2c);
+
+            c++;
+
+            if(c == 20){
+                irq_set_enabled(SELECT_BTN, true); // Habilito la interrupcion del boton de seleccion cada 20 ciclos
+                c = 0;
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -151,12 +173,9 @@ void ui_task(void *params){
  * @brief Interrupcion que maneja el boton de seleccion
  * 
  */
-void IRQ_BTN(void){
-
-    if(gpio_get_irq_event_mask(SELECT_BTN) & GPIO_IRQ_EDGE_FALL){
-        gpio_acknowledge_irq(SELECT_BTN, GPIO_IRQ_EDGE_FALL);
-        user.select = (user.select + 1) % not_show; // Cambio el modo de seleccion
-    }
+void IRQ_BTN(uint gpio, uint32_t events){
+    user.select = (user.select + 1) % not_show; // Cambio el modo de seleccion
+    irq_set_enabled(SELECT_BTN, false); // Desactivo la interrupcion para evitar rebotes
 }
 
 /**
@@ -184,6 +203,18 @@ void i2c_config(void){
     gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);
     gpio_pull_up(I2C_SDA);
     gpio_pull_up(I2C_SCL);
+}
+
+void btns_config(void){
+    gpio_init(SELECT_BTN);
+    gpio_set_dir(SELECT_BTN, GPIO_IN);
+    gpio_pull_up(SELECT_BTN);
+    gpio_set_irq_enabled_with_callback(
+        SELECT_BTN,
+        GPIO_IRQ_EDGE_FALL,
+        true,
+        &IRQ_BTN
+    );
 }
 
 /**
@@ -223,6 +254,13 @@ int main() {
     adc_config();
     i2c_config();
     bh1750_init();
+    btns_config();
+
+    if (cyw43_arch_init()) {
+        printf("Wi-Fi init failed\n");
+    }    
+
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
 
     oled.external_vcc = false;
     ui_init(&oled, I2C_PORT, &user);
