@@ -1,3 +1,4 @@
+
 /*
 
 MIT License
@@ -317,4 +318,19 @@ void ssd1306_show(ssd1306_t *p) {
     *(p->buffer-1)=0x40;
 
     fancy_write(p->i2c_i, p->address, p->buffer-1, p->bufsize+1, "ssd1306_show");
+}
+
+// Invierte los valores de los píxeles en un recuadro
+void ssd1306_invert_square(ssd1306_t *p, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
+    for(uint32_t i=0; i<width; ++i) {
+        for(uint32_t j=0; j<height; ++j) {
+            uint32_t px = x + i;
+            uint32_t py = y + j;
+            if(px < p->width && py < p->height) {
+                uint32_t buf_idx = px + p->width * (py >> 3);
+                uint8_t mask = 1 << (py & 0x07);
+                p->buffer[buf_idx] ^= mask;
+            }
+        }
+    }
 }

@@ -23,6 +23,7 @@ typedef struct{
     bool mode;
     uint8_t select;
     uint32_t lux;
+    bool change_value_mode;
 }user_t;
 
 enum select_enum{

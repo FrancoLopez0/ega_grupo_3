@@ -7,7 +7,7 @@ import sys
 # Configuración
 PORT = 'COM8'       # Cambiar a tu puerto (ej: '/dev/ttyUSB0' en Linux)
 BAUDRATE = 115200   # Ajustar según el dispositivo
-CSV_FILE = 'led_fusion_raw_samples.csv'
+CSV_FILE = 'led_no_kalman_samples.csv'
 TIMEOUT = 1         # Tiempo de espera para lectura (segundos)
 
 # Variables globales

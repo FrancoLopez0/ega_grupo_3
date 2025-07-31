@@ -74,8 +74,8 @@ void ui_update_params(ssd1306_t *p_oled, user_t *p_user){
 
         char time_ui[15], sp_f_ui[15];
 
-        sprintf(time_ui, "TIME:1000");
-        sprintf(sp_f_ui, "SP_F:25000");
+        sprintf(time_ui, "TIME:%d", p_user->rise_time_ms);
+        sprintf(sp_f_ui, "SP_F:%d", p_user->sp_f);
 
         ssd1306_draw_string(
         p_oled,
@@ -92,23 +92,44 @@ void ui_update_params(ssd1306_t *p_oled, user_t *p_user){
     );
     }
     
-    switch (p_user->select)
-    {
-    case set_sp:
-        ssd1306_draw_empty_square(p_oled, sp_x-6, sp_y-2, number_w, 10);
-        break;
-    case set_lux:
-        ssd1306_draw_empty_square(p_oled, lux_x-1, lux_y-2, number_w, 10);
-        break;
-    case set_time:
-        ssd1306_draw_empty_square(p_oled, time_x-1, time_y-2, number_w-2, 10);
-        break;
-    case set_sp_f:
-        ssd1306_draw_empty_square(p_oled, time_x-1, sp_y-2, number_w-2, 10);
-        break;
-    default:
-        break;
+    if(p_user->change_value_mode){
+        switch (p_user->select)
+        {
+        case set_sp:
+            ssd1306_invert_square(p_oled, sp_x-6, sp_y-2, number_w, 10);
+            break;
+        case set_lux:
+            ssd1306_invert_square(p_oled, lux_x-1, lux_y-2, number_w, 10);
+            break;
+        case set_time:
+            ssd1306_invert_square(p_oled, time_x-1, time_y-2, number_w-2, 10);
+            break;
+        case set_sp_f:
+            ssd1306_invert_square(p_oled, time_x-1, sp_y-2, number_w-2, 10);
+            break;
+        default:
+            break;
+        }
+    }else{
+        switch (p_user->select)
+        {
+        case set_sp:
+            ssd1306_draw_empty_square(p_oled, sp_x-6, sp_y-2, number_w, 10);
+            break;
+        case set_lux:
+            ssd1306_draw_empty_square(p_oled, lux_x-1, lux_y-2, number_w, 10);
+            break;
+        case set_time:
+            ssd1306_draw_empty_square(p_oled, time_x-1, time_y-2, number_w-2, 10);
+            break;
+        case set_sp_f:
+            ssd1306_draw_empty_square(p_oled, time_x-1, sp_y-2, number_w-2, 10);
+            break;
+        default:
+            break;
+        }
     }
+
 }
 
 /**
@@ -127,14 +148,14 @@ void ui_update_user_sp(ssd1306_t *p_oled, bar_t *p_bar, uint32_t sp){
 
     ssd1306_draw_filled_triangle(
         p_oled,
-        p_bar->w * sp/MAX_SP, p_bar->y - p_bar->h/2,
+        p_bar->w * sp/MAX_LUX, p_bar->y - p_bar->h/2,
         triangle_size,
         true
     );
     
     ssd1306_draw_filled_triangle(
         p_oled,
-        p_bar->w * sp/MAX_SP, p_bar->y + p_bar->h+1,
+        p_bar->w * sp/MAX_LUX, p_bar->y + p_bar->h+1,
         triangle_size,
         false
     );
