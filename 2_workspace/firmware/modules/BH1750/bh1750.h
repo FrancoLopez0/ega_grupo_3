@@ -1,8 +1,5 @@
 #include "hardware/i2c.h"
 
-#define I2C_PORT i2c0
-#define I2C_SDA 16
-#define I2C_SCL 17
 #define BH1750_ADDR 0x23
 
 /**

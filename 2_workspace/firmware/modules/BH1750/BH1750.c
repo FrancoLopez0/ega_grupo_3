@@ -1,5 +1,7 @@
 #include "bh1750.h"
 
+i2c_inst_t *I2C_PORT = i2c0;
+
 /**
  * @brief Inicializa el bh1750
  * 

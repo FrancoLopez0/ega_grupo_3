@@ -323,7 +323,8 @@ void ui_update_user_sp(ssd1306_t *p_oled, bar_t *p_bar, uint32_t sp){
  * @param p_bar 
  */
 void ui_update_bar(ssd1306_t *p_oled, bar_t *p_bar, user_t *p_user){
-    ssd1306_clear_square(p_oled, p_bar->x, p_bar->y, p_bar->w, p_bar->h);
+
+    ssd1306_clear_square(p_oled, p_bar->x, 0, p_bar->w, p_bar->h+20);
 
     ssd1306_draw_empty_square(
         p_oled,

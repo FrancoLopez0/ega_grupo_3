@@ -23,13 +23,10 @@
 #include "queue.h"
 #include "semphr.h"
 
-#define I2C_FREQ        400*1000
-#define PIN_TEMT6000    28
-#define CHANN_TEMT6000  2
+#include "config.h"
 
-#define MAX_SET_POINT 1000
-#define MAX_RISE_TIME 10000 // 10 segundos
-#define PWM_WRAP      4095
+#define I2C_FREQ        400*1000
+#define CHANN_TEMT6000  2
 
 #define SELECT_BTN 20
 
@@ -39,16 +36,11 @@
 #define ADC_CLK_BASE 48000000.f
 #define CONVERSION_FACTOR 3.3f / (1 << 12)
 
-#define PIN_PWM 1
 #define PWM_CLK 100000
 
 #define BH1750_SAMPLE_TIME_MS 120
 
 #define MAX_COUNT 100
-
-#define CLK 19
-#define DT 18
-#define SW 20
 
 typedef struct{
     bool clk; // Estado del clk del encoder
@@ -107,7 +99,7 @@ user_t user = {
     .sp_f = 2000,
     .menu = config_menu,
     .min = 100,
-    .max = 1000,
+    .max = 2500,
     .day = 5,
     .month = 8,
     .age = 25,
@@ -191,12 +183,12 @@ void control_task(void *params){
     
     float value_to_control = 0;
     float kd = 0.0f;
-    float kp = 0.25;
-    float ki = 0.2;
+    float kp = 0.15;
+    float ki = 0.5;
     float error, prev_error, diferential_error, integral_error;
     float prev_time;
     float dt;
-    float pwm;
+    uint16_t pwm;
     float h = PWM_WRAP / MAX_SET_POINT;
     float pid;
     control_t control;
@@ -213,22 +205,25 @@ void control_task(void *params){
 
         integral_error += error * dt;
 
-        pid += error * kp + diferential_error * kd + integral_error * ki;
+        pid = error * kp + diferential_error * kd + integral_error * ki;
 
         pwm = (uint16_t)(pid * h);
 
         // Saturación
-        if(pwm>PWM_WRAP){
+        if(pwm>=PWM_WRAP){
             pwm = PWM_WRAP;
         }
-        else if(pwm<0){
+        if(pwm<0){
             pwm = 0;
         }
+
+        printf("PID:%.2f PWM:%d error: %.2f lux:%.2f\n", pid, pwm, error, control.input);
 
         pwm_set_gpio_level(PIN_PWM,PWM_WRAP - pwm);
 
         prev_time = (float)pdTICKS_TO_MS(xTaskGetTickCount())/1000.0;
 
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
@@ -266,6 +261,7 @@ void central_task(void *params){
     float R = 0.5f;      // Ruido de medición (depende del TMT6000 y el ADC)
 
     control_t control;
+
     adc_run(true);
 
     for(;;){
@@ -277,7 +273,7 @@ void central_task(void *params){
             if(xQueueReceive(q_i2c_bh1750, &bh1750, 0) == pdPASS)
             {
                 // printf("bh1750: %d tmt6000: %.2f\n", bh1750.lux, lux_temt6000);
-                lux = kalman_update(bh1750.lux, 0.1, Q, &x_est, &P);
+                // lux = kalman_update(bh1750.lux, 0.1, Q, &x_est, &P);
             }
 
             lux = kalman_update(lux_temt6000, R, Q, &x_est, &P); // Filtro de Kalman
@@ -286,7 +282,19 @@ void central_task(void *params){
 
             error = set_point - lux;
 
-            // xQueueSend(q_control, &control, portMAX_DELAY);
+            control.input = lux;
+            // control.set_point = 3000.0; //MIN 80 MAX 3000
+            control.set_point += 1.0;
+            if(control.set_point > 3000) control.set_point = 80.0;
+
+            xSemaphoreTake(semphr_user, portMAX_DELAY);
+                user.sp = control.set_point;
+                // control.set_point = user.sp;
+            xSemaphoreGive(semphr_user);
+
+            // printf("LUX DESDE CENTRAL: %.2f \n", control.input);
+
+            xQueueSend(q_control, &control, portMAX_DELAY);
 
             // pwm += (kp * error + kd * delta_error / 1000) * h; // Calculo el pwm a aplicar
 
@@ -377,12 +385,18 @@ void user_task(void *params) {
         // }
         set_user_event_count = uxSemaphoreGetCount(set_user_event);
 
-        printf("se preciono %d veces y se incremento %d veces\n",uxSemaphoreGetCount(set_user_event));
+        // printf("se preciono %d veces y se incremento %d veces\n",uxSemaphoreGetCount(set_user_event));
 
         xQueueReceive(encoder_event, &encoder_increment, 0);
+
+        user.menu = uxSemaphoreGetCount(change_event) % 3;
+
+        if(uxSemaphoreGetCount(change_event)==100){
+            xQueueReset(change_event);
+        }
         
         if(set_user_event_count % 2 == 1){
-            printf("Modo cambio\n");
+            // printf("Modo cambio\n");
             
             user.change_value_mode = true; // Indico que se esta cambiando el valor del usuario
             
@@ -461,7 +475,7 @@ void user_task(void *params) {
 
             encoder_increment = 0;
         }else{
-            printf("Sin cambiar, incremento encoder_increment %d\n", encoder_increment);
+            // printf("Sin cambiar, incremento encoder_increment %d\n", encoder_increment);
             user.change_value_mode = false;
 
             if(user.menu == params_menu){
@@ -522,6 +536,11 @@ void btns_task(void *params) {
         user_increment = encoder_count(&encoder); // Llamo a la funcion que cuenta el encoder
         if(user_increment!=0) xQueueSend(encoder_event, &user_increment, portMAX_DELAY);
         encoder.prev_clk = encoder.clk; // Guardo el estado anterior del clk
+
+        if(!gpio_get(PIN_BTN)){
+            xSemaphoreGive(change_event);
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
 
         if(!encoder.sw) { // Si el boton esta presionado
             xSemaphoreGive(set_user_event);
@@ -619,15 +638,22 @@ void ui_task(void *params){
 
             xSemaphoreTake(semphr_user, portMAX_DELAY); // Tomo el semáforo para evitar conflictos de acceso al I2C
                 user.lux = lux;
+                
+                if(lux < user.min){
+                    // cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+                    gpio_put(PIN_LED_GREEN, 0);
+                    gpio_put(PIN_LED_RED, 1);
+                }
+                else if(lux > user.max){
+                    gpio_put(PIN_LED_GREEN, 1);
+                    gpio_put(PIN_LED_RED, 0);
+                    // cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+                }else{
+                    gpio_put(PIN_LED_GREEN, 1);
+                    gpio_put(PIN_LED_RED, 1);
+                }
+                
             xSemaphoreGive(semphr_user); // Libero el semáforo
-
-            if(top_limit_lux < lux){
-                cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
-            }
-            else{
-                cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-            }
-            
             xQueueSend(q_i2c_guardian, &ui_guardian, 1);
 
             
@@ -666,7 +692,8 @@ void i2c_config(void){
  * @brief Configura el boton de seleccion
  * 
  */
-void btns_config(void){
+void gpio_config(void){\
+    
     // gpio_init(SELECT_BTN);
     // gpio_set_dir(SELECT_BTN, GPIO_IN);
     // gpio_pull_up(SELECT_BTN);
@@ -681,6 +708,18 @@ void btns_config(void){
     gpio_set_dir(SW, GPIO_IN);
     gpio_pull_up(SW);
 
+    gpio_init(PIN_BTN);
+    gpio_set_dir(PIN_BTN, GPIO_IN);
+    gpio_pull_up(PIN_BTN);
+
+    gpio_init(PIN_LED_GREEN);
+    gpio_set_dir(PIN_LED_GREEN, GPIO_OUT);
+    gpio_pull_up(PIN_LED_GREEN);
+
+    gpio_init(PIN_LED_RED);
+    gpio_set_dir(PIN_LED_RED, GPIO_OUT);
+    gpio_pull_up(PIN_LED_RED);
+    
     // gpio_set_irq_enabled_with_callback(
     //     SW,
     //     GPIO_IRQ_EDGE_FALL,
@@ -745,7 +784,7 @@ int main() {
 
     q_raw_adc_values = xQueueCreate(BUFF_SIZE, sizeof(uint16_t));
     q_values_to_show = xQueueCreate(BUFF_SIZE, sizeof(float));
-    q_control = xQueueCreate(BUFF_SIZE, sizeof(float));
+    q_control = xQueueCreate(BUFF_SIZE, sizeof(control_t));
     #ifdef PRINT_VALUES_MODE
     q_send_uart = xQueueCreate(BUFF_SIZE, sizeof(float));
     #endif
@@ -754,12 +793,13 @@ int main() {
 
     semphr_user = xSemaphoreCreateMutex();
     set_user_event = xSemaphoreCreateCounting(100,0);
+    change_event = xSemaphoreCreateCounting(100,0);
     encoder_event = xQueueCreate(2, sizeof(int));
 
     adc_config();
     i2c_config();
     bh1750_init();
-    btns_config();
+    gpio_config();
     config_pwm(PIN_PWM, PWM_CLK);
 
     pwm_set_gpio_level(PIN_PWM, 2000);
@@ -847,14 +887,14 @@ int main() {
         NULL
     );
 
-    // xTaskCreate(
-    //     control_task,
-    //     "control_task",
-    //     configMINIMAL_STACK_SIZE*2,
-    //     NULL,
-    //     tskIDLE_PRIORITY + 1,
-    //     NULL
-    // );
+    xTaskCreate(
+        control_task,
+        "control_task",
+        configMINIMAL_STACK_SIZE*3,
+        NULL,
+        tskIDLE_PRIORITY + 1,
+        NULL
+    );
 
     vTaskStartScheduler();
     
