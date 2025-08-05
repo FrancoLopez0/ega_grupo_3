@@ -34,10 +34,165 @@ void ui_init(ssd1306_t *p_oled, i2c_inst_t *i2c, user_t *p_user){
  * @param p_user 
  */
 void ui_update(ssd1306_t *p_oled, user_t *p_user){
-    ui_update_params(p_oled, p_user);
-    ui_update_bar(p_oled, &bar, p_user);
-    ui_update_user_sp(p_oled,&bar, p_user->sp);
+    
+    switch (p_user->menu)
+    {
+        case params_menu:
+            ui_update_params(p_oled, p_user);
+            ui_update_bar(p_oled, &bar, p_user);
+            ui_update_user_sp(p_oled,&bar, p_user->sp);
+        break;
+        
+        case config_menu:
+            ui_user_config(p_oled, p_user);
+        break;
+
+        case log_menu:
+            ui_logs(p_oled, p_user);
+        break;
+
+        default:
+            break;
+    }
+    
     ssd1306_show(p_oled);
+}
+
+void ui_logs(ssd1306_t *p_oled, user_t *p_user){
+    char log[25], value[5];
+
+    ssd1306_clear(p_oled);
+
+    for(int i=0; i<3; i++){
+        sprintf(log, "%02d:%02d:%02d - %02d/%02d/%02d", 0, 36, 3, 5, 8, 25);
+        sprintf(value, "lux:%d", 5);
+
+        ssd1306_draw_string(
+            p_oled,
+            5, 5 + i*25,
+            1,
+            log
+        );
+
+        ssd1306_draw_string(
+            p_oled,
+            5, 5 + i*25 + 10,
+            1,
+            value
+        );
+    }
+
+}
+
+static const uint8_t width_hour=30, height_hour=22, origin_hour_x=10, origin_hour_y=0;
+
+/**
+ * @brief Dibuja la configuracion de usuario
+ * 
+ * @param p_oled 
+ * @param p_user 
+ */
+void ui_user_config(ssd1306_t *p_oled, user_t *p_user){
+
+    char time[10], min[10], max[10], date[10];
+
+    sprintf(time, "%02d:%02d:%02d", p_user->hour, p_user->minute, p_user->sencond);
+    sprintf(date, "%02d/%02d/%02d", p_user->day, p_user->month, p_user->age);
+    sprintf(min, "min:%d", p_user->min);
+    sprintf(max, "max:%d", p_user->max);
+
+    ssd1306_clear(p_oled);
+
+    ssd1306_draw_string(
+        p_oled,
+        15, 5,
+        2,
+        time
+    );
+
+    ssd1306_draw_string(
+        p_oled,
+        sp_x, sp_y,
+        1,
+        min
+    );
+
+    ssd1306_draw_string(
+        p_oled,
+        40, time_y-5,
+        1,
+        date
+    );
+
+    ssd1306_draw_string(
+        p_oled,
+        time_x, sp_y,
+        1,
+        max
+    );
+    
+    if(p_user->change_value_mode){
+        switch (p_user->select)
+        {
+        case hour_config:
+            ssd1306_invert_square(p_oled, origin_hour_x, origin_hour_y, width_hour, height_hour);
+            break;
+        case minute_config:
+            ssd1306_invert_square(p_oled, origin_hour_x+width_hour+6, origin_hour_y, width_hour, height_hour);
+            break;
+        case second_config:
+            ssd1306_invert_square(p_oled, origin_hour_x+width_hour*2+13, origin_hour_y, width_hour, height_hour);
+            break;
+        case day_config:
+            ssd1306_invert_square(p_oled, 38, 22, 13, 10);
+            break;
+        case month_config:
+            ssd1306_invert_square(p_oled, 38+18, 22, 13, 10);
+            break;
+        case age_config:
+            ssd1306_invert_square(p_oled, 38*2 - 1, 22, 13, 10);
+            break;      
+        case min_config:
+            ssd1306_invert_square(p_oled, sp_x-6, sp_y-2, number_w, 10);
+            break;  
+        case max_config:
+            ssd1306_invert_square(p_oled, time_x-1, sp_y-2, number_w-2, 10);
+            break;  
+        default:
+            break;
+        }
+    }else{
+        switch (p_user->select)
+        {
+        case hour_config:
+            ssd1306_draw_empty_square(p_oled, origin_hour_x, origin_hour_y, width_hour, height_hour);
+            break;
+        case minute_config:
+            ssd1306_draw_empty_square(p_oled, origin_hour_x+width_hour+6, origin_hour_y, width_hour, height_hour);
+            break;
+        case second_config:
+            ssd1306_draw_empty_square(p_oled, origin_hour_x+width_hour*2+13, origin_hour_y, width_hour, height_hour);
+            break;
+        case day_config:
+            ssd1306_draw_empty_square(p_oled, 38, 22, 13, 10);
+            break;
+        case month_config:
+            ssd1306_draw_empty_square(p_oled, 38+18, 22, 13, 10);
+            break;
+        case age_config:
+            ssd1306_draw_empty_square(p_oled, 38*2 - 1, 22, 13, 10);
+            break;      
+        case min_config:
+            ssd1306_draw_empty_square(p_oled, sp_x-6, sp_y-2, number_w, 10);
+            break;  
+        case max_config:
+            ssd1306_draw_empty_square(p_oled, time_x-1, sp_y-2, number_w-2, 10);
+            break;    
+        default:
+            break;
+        }
+    }
+
 }
 
 /**

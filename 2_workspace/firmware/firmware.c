@@ -28,6 +28,7 @@
 #define CHANN_TEMT6000  2
 
 #define MAX_SET_POINT 1000
+#define MAX_RISE_TIME 10000 // 10 segundos
 #define PWM_WRAP      4095
 
 #define SELECT_BTN 20
@@ -44,6 +45,24 @@
 #define BH1750_SAMPLE_TIME_MS 120
 
 #define MAX_COUNT 100
+
+#define CLK 19
+#define DT 18
+#define SW 20
+
+typedef struct{
+    bool clk; // Estado del clk del encoder
+    bool dt; // Estado del dt del encoder
+    bool sw; // Estado del boton del encoder
+    bool prev_clk; // Estado anterior del clk del encoder
+    int user_increment; // Incremento del usuario
+    int user_select; // Seleccion del usuario
+    TickType_t last_valid_edge; // Ultimo flanco valido
+    TickType_t debounce_time; // Tiempo de debounce
+    TickType_t last_edge_time; // Ultimo tiempo de flanco
+    TickType_t current_edge_time; // Tiempo actual de flanco
+    TickType_t rotation_period; // Periodo de rotacion
+}encoder_t;
 
 typedef struct{
     uint16_t lux; // Valor en lux
@@ -67,11 +86,15 @@ typedef struct{
     void * context;
 }i2c_guardian_t;
 
-QueueHandle_t q_raw_adc_values, q_values_to_show;
+QueueHandle_t q_raw_adc_values, q_values_to_show, q_control;
+
+#ifdef PRINT_VALUES_MODE
 QueueHandle_t q_send_uart;
+#endif
+
 QueueHandle_t q_i2c_guardian;
 QueueHandle_t q_i2c_bh1750;
-SemaphoreHandle_t semphr_user;
+SemaphoreHandle_t semphr_user, set_user_event, encoder_event, change_event;
 ssd1306_t oled;
 
 user_t user = {
@@ -81,7 +104,16 @@ user_t user = {
     .select = set_sp,
     .change_value_mode = false,
     .rise_time_ms = 1000,
-    .sp_f = 2000
+    .sp_f = 2000,
+    .menu = config_menu,
+    .min = 100,
+    .max = 1000,
+    .day = 5,
+    .month = 8,
+    .age = 25,
+    .hour = 2,
+    .minute = 55,
+    .sencond = 10
 };
 
 void i2c_guard_bh1750(bh1750_t *bh1750){
@@ -129,17 +161,6 @@ void bh1750_task(void *params){
     }
 }
 
-void bh1750_reader_task(void *params){
-    bh1750_t bh1750_context_reader = {
-        .lux = 0
-    };
-
-    for(;;){
-        xQueueReceive(q_i2c_bh1750, &bh1750_context_reader, portMAX_DELAY);
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-}
-
 float kalman_update(float z, float R, float Q, float *x_est, float *P) {
     // z: nueva medición
     // R: varianza del ruido de medición
@@ -161,6 +182,56 @@ float kalman_update(float z, float R, float Q, float *x_est, float *P) {
     return *x_est;  // Devuelve el nuevo valor estimado
 }
 
+typedef struct{
+    float set_point;
+    float input;
+}control_t;
+
+void control_task(void *params){
+    
+    float value_to_control = 0;
+    float kd = 0.0f;
+    float kp = 0.25;
+    float ki = 0.2;
+    float error, prev_error, diferential_error, integral_error;
+    float prev_time;
+    float dt;
+    float pwm;
+    float h = PWM_WRAP / MAX_SET_POINT;
+    float pid;
+    control_t control;
+
+    for(;;){
+
+        xQueueReceive(q_control, &control, portMAX_DELAY);
+
+        error = control.set_point - control.input;
+
+        dt = (float)pdTICKS_TO_MS(xTaskGetTickCount())/1000.0 - prev_time;
+
+        diferential_error = (error - prev_error)/dt;
+
+        integral_error += error * dt;
+
+        pid += error * kp + diferential_error * kd + integral_error * ki;
+
+        pwm = (uint16_t)(pid * h);
+
+        // Saturación
+        if(pwm>PWM_WRAP){
+            pwm = PWM_WRAP;
+        }
+        else if(pwm<0){
+            pwm = 0;
+        }
+
+        pwm_set_gpio_level(PIN_PWM,PWM_WRAP - pwm);
+
+        prev_time = (float)pdTICKS_TO_MS(xTaskGetTickCount())/1000.0;
+
+    }
+}
+
 /**
  * @brief Tarea que controla la luminosidad del Led y envia los datos a graficar
  * 
@@ -179,6 +250,8 @@ void central_task(void *params){
     float kd = 0.0f;
     float h =  PWM_WRAP / MAX_SET_POINT;
 
+    bh1750_t bh1750;
+
     // Filtrado
     const float alpha = 0.414;
     float set_point = user.sp;
@@ -192,29 +265,32 @@ void central_task(void *params){
     float Q = 0.01f;     // Ruido de proceso (ajustable)
     float R = 0.5f;      // Ruido de medición (depende del TMT6000 y el ADC)
 
+    control_t control;
     adc_run(true);
 
     for(;;){
         if(xQueueReceive(q_raw_adc_values, &raw_adc_values, portMAX_DELAY)){
 
+            
             lux_temt6000 = temt6000_get_lux(raw_adc_values);
+            
+            if(xQueueReceive(q_i2c_bh1750, &bh1750, 0) == pdPASS)
+            {
+                // printf("bh1750: %d tmt6000: %.2f\n", bh1750.lux, lux_temt6000);
+                lux = kalman_update(bh1750.lux, 0.1, Q, &x_est, &P);
+            }
 
             lux = kalman_update(lux_temt6000, R, Q, &x_est, &P); // Filtro de Kalman
 
             prev_lux = lux;
 
             error = set_point - lux;
-            
-            pwm += (kp * error + kd * delta_error / 1000) * h; // Calculo el pwm a aplicar
 
-            if(pwm>PWM_WRAP){
-                pwm = PWM_WRAP;
-            }
-            else if(pwm<0){
-                pwm = 0;
-            }
+            // xQueueSend(q_control, &control, portMAX_DELAY);
 
-            pwm_set_gpio_level(PIN_PWM,PWM_WRAP - (uint16_t)pwm);
+            // pwm += (kp * error + kd * delta_error / 1000) * h; // Calculo el pwm a aplicar
+
+            // pwm_set_gpio_level(PIN_PWM,PWM_WRAP - (uint16_t)pwm);
 
             // printf("pwm: %d  error: %f \n",pwm, error);
 
@@ -233,6 +309,7 @@ void central_task(void *params){
     }
 }
 
+#ifdef PRINT_VALUES_MODE
 /**
  * @brief Envia los datos por UART
  * 
@@ -247,26 +324,9 @@ void send_uart_task(void *params){
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
+#endif
 
-#define CLK 19
-#define DT 18
-#define SW 20
-
-typedef struct{
-    bool clk; // Estado del clk del encoder
-    bool dt; // Estado del dt del encoder
-    bool sw; // Estado del boton del encoder
-    bool prev_clk; // Estado anterior del clk del encoder
-    int user_increment; // Incremento del usuario
-    int user_select; // Seleccion del usuario
-    TickType_t last_valid_edge; // Ultimo flanco valido
-    TickType_t debounce_time; // Tiempo de debounce
-    TickType_t last_edge_time; // Ultimo tiempo de flanco
-    TickType_t current_edge_time; // Tiempo actual de flanco
-    TickType_t rotation_period; // Periodo de rotacion
-}encoder_t;
-
-int encoder_event(encoder_t *encoder) {
+int encoder_increment(encoder_t *encoder) {
     if(!encoder->clk && encoder->prev_clk) {
         TickType_t now = xTaskGetTickCount();
         
@@ -300,19 +360,128 @@ int encoder_count(encoder_t *encoder) {
             else increment = 1;
             
             return increment * (encoder->dt ? 1 : -1); // Retorna el incremento o decremento según el estado del dt
-
-            // // Cambio de valor según dirección
-            // if(gpio_get(DT)) {
-            //     return increment;
-            // } else {
-            //     return -increment;
-            // }
         }
     }
     return 0;
 }
 
-void btn_task(void *params) {
+void user_task(void *params) {
+
+    user_t user_view;
+    int encoder_increment = 0;
+    uint8_t set_user_event_count;
+
+    for(;;){
+        // if(xSemaphoreTake(set_user_event, 0) == pdPASS){
+        //     printf("El usuario toco el boton\n");
+        // }
+        set_user_event_count = uxSemaphoreGetCount(set_user_event);
+
+        printf("se preciono %d veces y se incremento %d veces\n",uxSemaphoreGetCount(set_user_event));
+
+        xQueueReceive(encoder_event, &encoder_increment, 0);
+        
+        if(set_user_event_count % 2 == 1){
+            printf("Modo cambio\n");
+            
+            user.change_value_mode = true; // Indico que se esta cambiando el valor del usuario
+            
+            if(user.menu == params_menu){
+                switch (user.select)
+                {
+                case set_sp:
+                    user.sp += encoder_increment; // Actualizo el set point del usuario
+                    if(user.sp < 0){
+                        user.sp = 0; // Evito que el set point sea negativo
+                    }
+                    if(user.sp > MAX_SET_POINT){
+                        user.sp = MAX_SET_POINT; // Evito que el set point sea mayor al maximo
+                    }
+                    break;
+                case set_sp_f:
+                    
+                    break;
+                case set_time:
+                    user.rise_time_ms += encoder_increment; // Actualizo el set point del usuario
+                    if(user.rise_time_ms < 0){
+                        user.rise_time_ms = 0; // Evito que el set point sea negativo
+                    }
+                    if(user.rise_time_ms > MAX_RISE_TIME){
+                        user.rise_time_ms = MAX_RISE_TIME; // Evito que el set point sea mayor al maximo
+                    }
+                default:
+                    break;
+                }
+            }
+
+            if(user.menu == config_menu){
+                switch (user.select)
+                {
+                    case hour_config:
+                        if(user.hour + encoder_increment >0)
+                            user.hour += encoder_increment;
+                        user.hour %= 60;
+                    break;
+                    case second_config:
+                        if(user.sencond + encoder_increment >0)
+                            user.sencond += encoder_increment;
+                        user.sencond %= 60;
+                    break;
+                    case minute_config:
+                        if(user.minute + encoder_increment >0)
+                            user.minute += encoder_increment;
+                        user.minute %= 60;
+                    break;
+                    case day_config:
+                        if(user.day + encoder_increment > 0)
+                            user.day += encoder_increment;
+                        user.day %= 32;
+                    break;
+                    case month_config:
+                        if(user.month + encoder_increment > 0)
+                            user.month += encoder_increment;
+                        user.month %= 13;
+                    break;
+                    case age_config:
+                        if(user.age + encoder_increment > 0)
+                            user.age += encoder_increment;
+                    break;
+                    case min_config:
+                        if(user.min + encoder_increment > 0)
+                            user.min += encoder_increment;
+                    break;
+                    case max_config:
+                        if(user.max + encoder_increment > 0)
+                            user.max += encoder_increment;
+                    break;
+                default:
+                    break;
+                }
+            }
+
+            encoder_increment = 0;
+        }else{
+            printf("Sin cambiar, incremento encoder_increment %d\n", encoder_increment);
+            user.change_value_mode = false;
+
+            if(user.menu == params_menu){
+                user.select = (user.select + encoder_increment) % not_show; // Actualizo la seleccion del usuario
+            }
+            if(user.menu == config_menu){
+                user.select = (user.select + encoder_increment) % 9;
+            }
+            encoder_increment = 0;
+        }
+        
+        if(uxSemaphoreGetCount(set_user_event)==100){
+            xQueueReset(set_user_event);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+void btns_task(void *params) {
     // Encoder
     enum select_enum option_menu = set_sp; // Cantidad de modos que no se muestran en la pantalla
     bool prev_clk = false; // Variable para detectar el cambio de estado del encoder
@@ -350,68 +519,65 @@ void btn_task(void *params) {
         encoder.dt = gpio_get(DT); // Leo el estado del dt del encoder
         encoder.sw = gpio_get(SW); // Leo el estado del boton del encoder
 
-        user_increment = encoder_event(&encoder); // Llamo a la funcion que cuenta el encoder
+        user_increment = encoder_count(&encoder); // Llamo a la funcion que cuenta el encoder
+        if(user_increment!=0) xQueueSend(encoder_event, &user_increment, portMAX_DELAY);
         encoder.prev_clk = encoder.clk; // Guardo el estado anterior del clk
 
         if(!encoder.sw) { // Si el boton esta presionado
-            printf("Entrando al bucle \n");
+            xSemaphoreGive(set_user_event);
             vTaskDelay(pdMS_TO_TICKS(200));
-            for(;;){
-                encoder.clk = gpio_get(CLK); // Leo el estado del clk del encoder
-                encoder.dt = gpio_get(DT); // Leo el estado del dt del encoder
-                encoder.sw = gpio_get(SW); // Leo el estado del boton del encoder
+            // for(;;){
+            //     encoder.clk = gpio_get(CLK); // Leo el estado del clk del encoder
+            //     encoder.dt = gpio_get(DT); // Leo el estado del dt del encoder
+            //     encoder.sw = gpio_get(SW); // Leo el estado del boton del encoder
 
-                user_increment = encoder_count(&encoder); // Llamo a la funcion que cuenta el encoder
+            //     user_increment = encoder_count(&encoder); // Llamo a la funcion que cuenta el encoder
 
-                xSemaphoreTake(semphr_user, portMAX_DELAY); // Tomo el semáforo para evitar conflictos de acceso al I2C
-                    user.change_value_mode = true; // Indico que se esta cambiando el valor del usuario
-                    switch (user.select)
-                    {
-                    case set_sp:
-                        if(user.sp += user_increment){
-                            user.sp += user_increment; // Actualizo el set point del usuario
-                        }
-                        else if(user.sp < 0){
-                            user.sp = 0; // Evito que el set point sea negativo
-                        } 
-                        break;
-                    case set_sp_f:
-                        if(user.sp_f += user_increment){
-                            user.sp_f += user_increment; // Actualizo el set point final del usuario
-                        }
-                        else if(user.sp_f < 0){
-                            user.sp_f = 0; // Evito que el set point final sea negativo
-                        }
-                        break;
-                    case set_time:
-                        if(user.rise_time_ms += user_increment){
-                            user.rise_time_ms += user_increment; // Actualizo el tiempo de subida del usuario
-                        }
-                        else if(user.rise_time_ms < 0){
-                            user.rise_time_ms = 0; // Evito que el tiempo de subida sea negativo
-                        }
-                    default:
-                        break;
-                    }
+            //     xSemaphoreTake(semphr_user, portMAX_DELAY); // Tomo el semáforo para evitar conflictos de acceso al I2C
+            //         user.change_value_mode = true; // Indico que se esta cambiando el valor del usuario
+            //         switch (user.select)
+            //         {
+            //         case set_sp:
+            //             user.sp += user_increment; // Actualizo el set point del usuario
 
-                    encoder.prev_clk = encoder.clk; // Guardo el estado anterior del clk
+            //             if(user.sp < 0){
+            //                 user.sp = 0; // Evito que el set point sea negativo
+            //             }
+            //             if(user.sp > MAX_SET_POINT){
+            //                 user.sp = MAX_SET_POINT; // Evito que el set point sea mayor al maximo
+            //             }
+            //             break;
+            //         case set_sp_f:
+                        
+            //             break;
+            //         case set_time:
+            //             user.rise_time_ms += user_increment; // Actualizo el set point del usuario
 
-                xSemaphoreGive(semphr_user); // Libero el semáforo 
-                if(!encoder.sw){
-                    printf("Saliendo del bucle \n");
-                    user.change_value_mode = false;
-                    vTaskDelay(pdMS_TO_TICKS(200));
-                    break;
-                };
-                vTaskDelay(pdMS_TO_TICKS(10));      
-            }
-            
+            //             if(user.rise_time_ms < 0){
+            //                 user.rise_time_ms = 0; // Evito que el set point sea negativo
+            //             }
+            //             if(user.rise_time_ms > MAX_RISE_TIME){
+            //                 user.rise_time_ms = MAX_RISE_TIME; // Evito que el set point sea mayor al maximo
+            //             }
+            //         default:
+            //             break;
+            //         }
+
+            //         encoder.prev_clk = encoder.clk; // Guardo el estado anterior del clk
+
+            //     xSemaphoreGive(semphr_user); // Libero el semáforo 
+            //     if(!encoder.sw){
+            //         user.change_value_mode = false;
+            //         vTaskDelay(pdMS_TO_TICKS(200));
+            //         break;
+            //     };
+            //     vTaskDelay(pdMS_TO_TICKS(10));      
+            // }
         }
         
-
-        xSemaphoreTake(semphr_user, portMAX_DELAY); // Tomo el semáforo para evitar conflictos de acceso al I2C
-            user.select = (user.select + user_increment) % not_show; // Actualizo la seleccion del usuario
-        xSemaphoreGive(semphr_user); // Libero el semáforo        
+        // xSemaphoreTake(semphr_user, portMAX_DELAY); // Tomo el semáforo para evitar conflictos de acceso al I2C
+        //     user.select = (user.select + user_increment) % not_show; // Actualizo la seleccion del usuario
+        // xSemaphoreGive(semphr_user); // Libero el semáforo        
         
         vTaskDelay(pdMS_TO_TICKS(10));
         // irq_set_enabled(SELECT_BTN, true); // Habilito la interrupcion del boton de seleccion cada 20 ciclos
@@ -468,15 +634,6 @@ void ui_task(void *params){
         }
         vTaskDelay(pdMS_TO_TICKS(5));
     }
-}
-
-/**
- * @brief Interrupcion que maneja el boton de seleccion
- * 
- */
-void IRQ_BTN(uint gpio, uint32_t events){
-    irq_set_enabled(SELECT_BTN, false); // Desactivo la interrupcion para evitar rebotes
-    user.select = (user.select + 1) % not_show; // Cambio el modo de seleccion
 }
 
 /**
@@ -588,11 +745,16 @@ int main() {
 
     q_raw_adc_values = xQueueCreate(BUFF_SIZE, sizeof(uint16_t));
     q_values_to_show = xQueueCreate(BUFF_SIZE, sizeof(float));
+    q_control = xQueueCreate(BUFF_SIZE, sizeof(float));
+    #ifdef PRINT_VALUES_MODE
     q_send_uart = xQueueCreate(BUFF_SIZE, sizeof(float));
+    #endif
     q_i2c_guardian = xQueueCreate(BUFF_SIZE, sizeof(i2c_guardian_t));
     q_i2c_bh1750 = xQueueCreate(BUFF_SIZE, sizeof(bh1750_t));
 
     semphr_user = xSemaphoreCreateMutex();
+    set_user_event = xSemaphoreCreateCounting(100,0);
+    encoder_event = xQueueCreate(2, sizeof(int));
 
     adc_config();
     i2c_config();
@@ -600,7 +762,7 @@ int main() {
     btns_config();
     config_pwm(PIN_PWM, PWM_CLK);
 
-    pwm_set_gpio_level (PIN_PWM, 2000);
+    pwm_set_gpio_level(PIN_PWM, 2000);
 
     if (cyw43_arch_init()) {
         printf("Wi-Fi init failed\n");
@@ -631,23 +793,23 @@ int main() {
         NULL
     );
 
-    xTaskCreate(
-        bh1750_reader_task,
-        "bh1750_reader_task",
-        configMINIMAL_STACK_SIZE,
-        NULL,
-        tskIDLE_PRIORITY + 1,
-        NULL
-    );
+    // xTaskCreate(
+    //     bh1750_reader_task,
+    //     "bh1750_reader_task",
+    //     configMINIMAL_STACK_SIZE,
+    //     NULL,
+    //     tskIDLE_PRIORITY + 1,
+    //     NULL
+    // );
 
-    xTaskCreate(
-        send_uart_task,
-        "send_uart_task",
-        configMINIMAL_STACK_SIZE*2,
-        NULL,
-        tskIDLE_PRIORITY + 1,
-        NULL
-    );
+    // xTaskCreate(
+    //     send_uart_task,
+    //     "send_uart_task",
+    //     configMINIMAL_STACK_SIZE*2,
+    //     NULL,
+    //     tskIDLE_PRIORITY + 1,
+    //     NULL
+    // );
 
     xTaskCreate(
         i2c_guardian_task,
@@ -668,13 +830,31 @@ int main() {
     );
 
     xTaskCreate(
-        btn_task,
-        "btn_task",
+        btns_task,
+        "btns_task",
         configMINIMAL_STACK_SIZE*2,
         NULL,
         tskIDLE_PRIORITY + 1,
         NULL
     );
+
+    xTaskCreate(
+        user_task,
+        "user_task",
+        configMINIMAL_STACK_SIZE*3,
+        NULL,
+        tskIDLE_PRIORITY + 1,
+        NULL
+    );
+
+    // xTaskCreate(
+    //     control_task,
+    //     "control_task",
+    //     configMINIMAL_STACK_SIZE*2,
+    //     NULL,
+    //     tskIDLE_PRIORITY + 1,
+    //     NULL
+    // );
 
     vTaskStartScheduler();
     
