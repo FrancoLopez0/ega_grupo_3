@@ -41,6 +41,7 @@ add_executable(firmware firmware.c )
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../freertos ${CMAKE_BINARY_DIR}/freertos)
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/modules/temt6000)
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/modules/bh1750)
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/modules/ds1307)
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/modules/ui)
 
 pico_set_program_name(firmware "firmware")
@@ -63,12 +64,14 @@ target_include_directories(firmware PRIVATE
 # Add any user requested libraries
 target_link_libraries(firmware 
         temt6000
+        ds1307
         ui
         bh1750
         freertos
         hardware_adc
         hardware_pwm
         pico_cyw43_arch_none
+
         )
 
 pico_add_extra_outputs(firmware)

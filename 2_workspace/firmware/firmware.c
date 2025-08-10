@@ -17,6 +17,7 @@
 #include "modules/temt6000/temt6000.h"
 #include "modules/bh1750/bh1750.h"
 #include "modules/ui/ui.h"
+#include "modules/ds1307/ds1307.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -78,7 +79,9 @@ typedef struct{
     void * context;
 }i2c_guardian_t;
 
-QueueHandle_t q_raw_adc_values, q_values_to_show, q_control;
+QueueHandle_t q_raw_adc_values, q_values_to_show, q_control, q_lux, q_rtc, q_rtc_config;
+
+ds1307_t g_rtc;
 
 #ifdef PRINT_VALUES_MODE
 QueueHandle_t q_send_uart;
@@ -102,7 +105,7 @@ user_t user = {
     .max = 2500,
     .day = 5,
     .month = 8,
-    .age = 25,
+    .year = 25,
     .hour = 2,
     .minute = 55,
     .sencond = 10
@@ -113,7 +116,7 @@ void i2c_guard_bh1750(bh1750_t *bh1750){
 }
 
 void i2c_guard_ssd1306(ui_t *ui){
-    ui_update(&oled, &user);
+    ui_update(&oled, ui->p_user);
 }
 
 void i2c_guardian_task(void *params){
@@ -174,11 +177,41 @@ float kalman_update(float z, float R, float Q, float *x_est, float *P) {
     return *x_est;  // Devuelve el nuevo valor estimado
 }
 
-typedef struct{
-    float set_point;
-    float input;
-}control_t;
+/**
+ * @brief Tarea que se encarga de enviar las solicitudes a la tarea guardiana I2C
+ * 
+ * @param pvParameters 
+ */
+void rtc_task(void *pvParameters){
+    i2c_guardian_t guardian;
 
+    guardian = (i2c_guardian_t){
+        .device = rtc_device,
+        .return_queue = q_rtc,
+        .callback = (void *)ds1307_get_time,
+        .context = &g_rtc
+    };
+
+    while(1){
+
+        if(xQueueReceive(q_rtc_config, &g_rtc, 0)){
+            guardian.callback = (void *) ds1307_set_time;
+            guardian.return_queue = NULL;
+            xQueueSend(q_i2c_guardian, &guardian, portMAX_DELAY);
+            guardian.callback = (void *) ds1307_get_time;
+            guardian.return_queue = q_rtc;
+        }
+
+        xQueueSend(q_i2c_guardian, &guardian, portMAX_DELAY);
+        vTaskDelay(1000);
+    }
+}
+
+/**
+ * @brief Tarea encargada de realizar el control de luminosidad
+ * 
+ * @param params 
+ */
 void control_task(void *params){
     
     float value_to_control = 0;
@@ -191,13 +224,14 @@ void control_task(void *params){
     uint16_t pwm;
     float h = PWM_WRAP / MAX_SET_POINT;
     float pid;
-    control_t control;
-
+    float set_point = 0;
+    
     for(;;){
 
-        xQueueReceive(q_control, &control, portMAX_DELAY);
+        xQueueReceive(q_control, &set_point, 0);
+        xQueueReceive(q_lux, &value_to_control, portMAX_DELAY);
 
-        error = control.set_point - control.input;
+        error = set_point - value_to_control;
 
         dt = (float)pdTICKS_TO_MS(xTaskGetTickCount())/1000.0 - prev_time;
 
@@ -217,7 +251,7 @@ void control_task(void *params){
             pwm = 0;
         }
 
-        printf("PID:%.2f PWM:%d error: %.2f lux:%.2f\n", pid, pwm, error, control.input);
+        // printf("PID:%.2f PWM:%d error: %.2f lux:%.2f\n", pid, pwm, error, value_to_control);
 
         pwm_set_gpio_level(PIN_PWM,PWM_WRAP - pwm);
 
@@ -260,8 +294,6 @@ void central_task(void *params){
     float Q = 0.01f;     // Ruido de proceso (ajustable)
     float R = 0.5f;      // Ruido de medición (depende del TMT6000 y el ADC)
 
-    control_t control;
-
     adc_run(true);
 
     for(;;){
@@ -280,21 +312,24 @@ void central_task(void *params){
 
             prev_lux = lux;
 
-            error = set_point - lux;
+            xQueueSend(q_lux, &lux, portMAX_DELAY);
 
-            control.input = lux;
+            // error = set_point - lux;
+
+            // control.input = lux;
             // control.set_point = 3000.0; //MIN 80 MAX 3000
-            control.set_point += 1.0;
-            if(control.set_point > 3000) control.set_point = 80.0;
 
-            xSemaphoreTake(semphr_user, portMAX_DELAY);
-                user.sp = control.set_point;
-                // control.set_point = user.sp;
-            xSemaphoreGive(semphr_user);
+            // control.set_point += 1.0;
+            // if(control.set_point > 3000) control.set_point = 80.0;
+
+            // xSemaphoreTake(semphr_user, portMAX_DELAY);
+            //     user.sp = control.set_point;
+            //     // control.set_point = user.sp;
+            // xSemaphoreGive(semphr_user);
 
             // printf("LUX DESDE CENTRAL: %.2f \n", control.input);
 
-            xQueueSend(q_control, &control, portMAX_DELAY);
+            // xQueueSend(q_control, &control, portMAX_DELAY);
 
             // pwm += (kp * error + kd * delta_error / 1000) * h; // Calculo el pwm a aplicar
 
@@ -373,117 +408,170 @@ int encoder_count(encoder_t *encoder) {
     return 0;
 }
 
+/**
+ * @brief Muestra y maneja la interfaz de usuario
+ * 
+ * @param params 
+ */
 void user_task(void *params) {
 
-    user_t user_view;
+    //  Vista de usario
+    user_t user_view = user;
+    user.sp = 0;
+    int set_point = 0;
+    int delta_time = 0, last_time = 0;
+    
+    //  Encoder
     int encoder_increment = 0;
     uint8_t set_user_event_count;
 
+    // Interfaz OLED
+    ui_t ui = {
+        .p_oled = &oled,
+        .p_user = &user
+    };
+
+    i2c_guardian_t ui_guardian = {
+        .device = ssd1306_device,
+        .return_queue = NULL,
+        .callback = (void *)i2c_guard_ssd1306,
+        .context = &ui
+    };
+
+    float lux = 0;
+
+    last_time = pdTICKS_TO_MS(xTaskGetTickCount());
+
+    int set_point_0 = user.sp, set_point_final = user.sp;
+    bool motion = true;
+
+    user_view.menu = config_menu;
+
+    ds1307_t rtc;
+
     for(;;){
-        // if(xSemaphoreTake(set_user_event, 0) == pdPASS){
-        //     printf("El usuario toco el boton\n");
-        // }
-        set_user_event_count = uxSemaphoreGetCount(set_user_event);
+        set_user_event_count = uxSemaphoreGetCount(set_user_event); // Tomo la cantidad de veces quese presiono el boton del encoder
 
-        // printf("se preciono %d veces y se incremento %d veces\n",uxSemaphoreGetCount(set_user_event));
+        if(xQueueReceive(encoder_event, &encoder_increment, 0)); // En caso de rotar el encoder recibo el valor en ticks de la rotacion
 
-        xQueueReceive(encoder_event, &encoder_increment, 0);
+        if(xQueueReceive(q_rtc, &rtc, 0) && motion){
+            user_view.hour = rtc.time.hours;
+            user_view.minute = rtc.time.minutes;
+            user_view.sencond = rtc.time.seconds;
 
-        user.menu = uxSemaphoreGetCount(change_event) % 3;
+            user_view.year = rtc.time.year;
+            user_view.month = rtc.time.month;
+            user_view.day = rtc.time.day;
 
-        if(uxSemaphoreGetCount(change_event)==100){
-            xQueueReset(change_event);
+            user = user_view;
+            // printf("%02d:%02d:%02d\n", user_view.hour, user_view.minute, user_view.sencond);
         }
-        
+
+        user_view.menu = config_menu;//uxSemaphoreGetCount(change_event) % 3; // Tomo la cantidad de veces que se presiono el boton de cambio de menu
+        user.menu = user_view.menu;
+
         if(set_user_event_count % 2 == 1){
-            // printf("Modo cambio\n");
+            motion = false;
+            ui.p_user = &user_view;
+            user_view.change_value_mode = true; // Indico que se esta cambiando el valor del usuario
             
-            user.change_value_mode = true; // Indico que se esta cambiando el valor del usuario
-            
-            if(user.menu == params_menu){
-                switch (user.select)
+            if(user_view.menu == params_menu){
+                switch (user_view.select)
                 {
                 case set_sp:
-                    user.sp += encoder_increment; // Actualizo el set point del usuario
-                    if(user.sp < 0){
-                        user.sp = 0; // Evito que el set point sea negativo
+                    user_view.sp += encoder_increment; // Actualizo el set point del usuario
+                    if(user_view.sp < 0){
+                        user_view.sp = 0; // Evito que el set point sea negativo
                     }
-                    if(user.sp > MAX_SET_POINT){
-                        user.sp = MAX_SET_POINT; // Evito que el set point sea mayor al maximo
+                    if(user_view.sp > MAX_SET_POINT){
+                        user_view.sp = MAX_SET_POINT; // Evito que el set point sea mayor al maximo
                     }
                     break;
                 case set_sp_f:
-                    
+                    user_view.sp_f += encoder_increment; // Actualizo el set point del usuario
+                    if(user_view.sp_f < 0){
+                        user_view.sp_f = 0; // Evito que el set point sea negativo
+                    }
+                    if(user_view.sp_f > MAX_SET_POINT){
+                        user_view.sp_f = MAX_SET_POINT; // Evito que el set point sea mayor al maximo
+                    }
                     break;
                 case set_time:
-                    user.rise_time_ms += encoder_increment; // Actualizo el set point del usuario
-                    if(user.rise_time_ms < 0){
-                        user.rise_time_ms = 0; // Evito que el set point sea negativo
+                    user_view.rise_time_ms += encoder_increment; // Actualizo el set point del usuario
+                    if(user_view.rise_time_ms < 0){
+                        user_view.rise_time_ms = 0; // Evito que el set point sea negativo
                     }
-                    if(user.rise_time_ms > MAX_RISE_TIME){
-                        user.rise_time_ms = MAX_RISE_TIME; // Evito que el set point sea mayor al maximo
+                    if(user_view.rise_time_ms > MAX_RISE_TIME){
+                        user_view.rise_time_ms = MAX_RISE_TIME; // Evito que el set point sea mayor al maximo
                     }
                 default:
                     break;
                 }
             }
 
-            if(user.menu == config_menu){
-                switch (user.select)
+            if(user_view.menu == config_menu){
+                ui.p_user = &user_view;
+
+                switch (user_view.select)
                 {
                     case hour_config:
-                        if(user.hour + encoder_increment >0)
-                            user.hour += encoder_increment;
-                        user.hour %= 60;
+                        if(user_view.hour + encoder_increment >0)
+                            user_view.hour += encoder_increment;
+                        user_view.hour %= 60;
+                        rtc.time.hours = user_view.hour;
                     break;
                     case second_config:
-                        if(user.sencond + encoder_increment >0)
-                            user.sencond += encoder_increment;
-                        user.sencond %= 60;
+                        if(user_view.sencond + encoder_increment >0)
+                            user_view.sencond += encoder_increment;
+                        user_view.sencond %= 60;
+                        rtc.time.seconds = user_view.sencond;
                     break;
                     case minute_config:
-                        if(user.minute + encoder_increment >0)
-                            user.minute += encoder_increment;
-                        user.minute %= 60;
+                        if(user_view.minute + encoder_increment >0)
+                            user_view.minute += encoder_increment;
+                        user_view.minute %= 60;
+                        rtc.time.minutes = user_view.minute;
                     break;
                     case day_config:
-                        if(user.day + encoder_increment > 0)
-                            user.day += encoder_increment;
-                        user.day %= 32;
+                        if(user_view.day + encoder_increment > 0)
+                            user_view.day += encoder_increment;
+                        user_view.day %= 32;
+                        rtc.time.day = user_view.day;
                     break;
                     case month_config:
-                        if(user.month + encoder_increment > 0)
-                            user.month += encoder_increment;
-                        user.month %= 13;
+                        if(user_view.month + encoder_increment > 0)
+                            user_view.month += encoder_increment;
+                        user_view.month %= 13;
+                        rtc.time.month = user_view.month;
                     break;
-                    case age_config:
-                        if(user.age + encoder_increment > 0)
-                            user.age += encoder_increment;
+                    case year_config:
+                        if(user_view.year + encoder_increment > 0)
+                            user_view.year += encoder_increment;
+                        rtc.time.year = user_view.year;
                     break;
                     case min_config:
-                        if(user.min + encoder_increment > 0)
-                            user.min += encoder_increment;
+                        if(user_view.min + encoder_increment > 0)
+                            user_view.min += encoder_increment;
                     break;
                     case max_config:
-                        if(user.max + encoder_increment > 0)
-                            user.max += encoder_increment;
+                        if(user_view.max + encoder_increment > 0)
+                            user_view.max += encoder_increment;
                     break;
                 default:
                     break;
                 }
             }
-
             encoder_increment = 0;
         }else{
-            // printf("Sin cambiar, incremento encoder_increment %d\n", encoder_increment);
-            user.change_value_mode = false;
+            user_view.change_value_mode = false;
 
-            if(user.menu == params_menu){
-                user.select = (user.select + encoder_increment) % not_show; // Actualizo la seleccion del usuario
+            if(user_view.menu == params_menu){
+                user_view.select = (user_view.select + encoder_increment) % not_show; // Actualizo la seleccion del usuario
             }
-            if(user.menu == config_menu){
-                user.select = (user.select + encoder_increment) % 9;
+            if(user_view.menu == config_menu){
+                user_view.select = (user_view.select + encoder_increment) % 9;
             }
+            user.select = user_view.select;
             encoder_increment = 0;
         }
         
@@ -491,10 +579,72 @@ void user_task(void *params) {
             xQueueReset(set_user_event);
         }
 
+        delta_time = pdTICKS_TO_MS(xTaskGetTickCount()) - last_time;
+        
+        if(delta_time >= user_view.rise_time_ms){
+            last_time = pdTICKS_TO_MS(xTaskGetTickCount());
+        }
+        
+        if(user.rise_time_ms >0){
+            set_point = (int)(((float)(set_point_final - set_point_0) / (float)user.rise_time_ms) * (float)delta_time) + set_point_0;
+            user.sp = set_point;
+        }
+        else{
+            set_point = user.sp;
+        }
+        
+        // printf("set_point: %d rise_time: %d set_point_final: %d\n", set_point, user.rise_time_ms, user.sp_f);
+
+        if(set_user_event_count % 2 == 0 && set_user_event_count != 0){ // Si es multiplo de 2
+            // user.sp = user_view.sp;
+            // user.rise_time_ms = user_view.rise_time_ms;
+            // user.sp_f = user_view.sp_f;
+            user = user_view;
+            xQueueSend(q_rtc_config, &rtc, portMAX_DELAY);
+
+
+            set_point_0 = user.sp;
+            set_point_final = user.sp_f;
+
+            ui.p_user = &user;
+
+            // printf("Seteado en: \n sp: %d\n sp_f: %d\n rise_time_ms: %d\n", user.sp, user.sp_f, user.rise_time_ms);
+
+            motion = true;
+            xQueueReset(set_user_event);
+        }
+       
+        xQueueSend(q_control, &set_point, portMAX_DELAY);
+
+        if(xQueueReceive(q_values_to_show, &lux, 0) == pdPASS){
+                
+                ui.p_user->lux = lux;
+
+                if(lux < user.min){
+                    // cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+                    gpio_put(PIN_LED_GREEN, 0);
+                    gpio_put(PIN_LED_RED, 1);
+                }
+                else if(lux > user.max){
+                    gpio_put(PIN_LED_GREEN, 1);
+                    gpio_put(PIN_LED_RED, 0);
+                    // cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+                }else{
+                    gpio_put(PIN_LED_GREEN, 1);
+                    gpio_put(PIN_LED_RED, 1);
+                }
+            xQueueSend(q_i2c_guardian, &ui_guardian, 1);
+        }
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
+/**
+ * @brief Tarea encargada de la revision del estado de los botones
+ * 
+ * @param params 
+ */
 void btns_task(void *params) {
     // Encoder
     enum select_enum option_menu = set_sp; // Cantidad de modos que no se muestran en la pantalla
@@ -545,120 +695,9 @@ void btns_task(void *params) {
         if(!encoder.sw) { // Si el boton esta presionado
             xSemaphoreGive(set_user_event);
             vTaskDelay(pdMS_TO_TICKS(200));
-            // for(;;){
-            //     encoder.clk = gpio_get(CLK); // Leo el estado del clk del encoder
-            //     encoder.dt = gpio_get(DT); // Leo el estado del dt del encoder
-            //     encoder.sw = gpio_get(SW); // Leo el estado del boton del encoder
-
-            //     user_increment = encoder_count(&encoder); // Llamo a la funcion que cuenta el encoder
-
-            //     xSemaphoreTake(semphr_user, portMAX_DELAY); // Tomo el semáforo para evitar conflictos de acceso al I2C
-            //         user.change_value_mode = true; // Indico que se esta cambiando el valor del usuario
-            //         switch (user.select)
-            //         {
-            //         case set_sp:
-            //             user.sp += user_increment; // Actualizo el set point del usuario
-
-            //             if(user.sp < 0){
-            //                 user.sp = 0; // Evito que el set point sea negativo
-            //             }
-            //             if(user.sp > MAX_SET_POINT){
-            //                 user.sp = MAX_SET_POINT; // Evito que el set point sea mayor al maximo
-            //             }
-            //             break;
-            //         case set_sp_f:
-                        
-            //             break;
-            //         case set_time:
-            //             user.rise_time_ms += user_increment; // Actualizo el set point del usuario
-
-            //             if(user.rise_time_ms < 0){
-            //                 user.rise_time_ms = 0; // Evito que el set point sea negativo
-            //             }
-            //             if(user.rise_time_ms > MAX_RISE_TIME){
-            //                 user.rise_time_ms = MAX_RISE_TIME; // Evito que el set point sea mayor al maximo
-            //             }
-            //         default:
-            //             break;
-            //         }
-
-            //         encoder.prev_clk = encoder.clk; // Guardo el estado anterior del clk
-
-            //     xSemaphoreGive(semphr_user); // Libero el semáforo 
-            //     if(!encoder.sw){
-            //         user.change_value_mode = false;
-            //         vTaskDelay(pdMS_TO_TICKS(200));
-            //         break;
-            //     };
-            //     vTaskDelay(pdMS_TO_TICKS(10));      
-            // }
         }
-        
-        // xSemaphoreTake(semphr_user, portMAX_DELAY); // Tomo el semáforo para evitar conflictos de acceso al I2C
-        //     user.select = (user.select + user_increment) % not_show; // Actualizo la seleccion del usuario
-        // xSemaphoreGive(semphr_user); // Libero el semáforo        
-        
+
         vTaskDelay(pdMS_TO_TICKS(10));
-        // irq_set_enabled(SELECT_BTN, true); // Habilito la interrupcion del boton de seleccion cada 20 ciclos
-    }
-}
-
-/**
- * @brief Muestra y maneja la interfaz de usuario
- * 
- * @param params 
- */
-void ui_task(void *params){
-    float lux = 0;
-    float top_limit_lux = MAX_LUX-500;
-    float bottom_limit_lux = 100;
-    uint8_t c = 0;
-
-    // Encoder
-    enum select_enum option_menu = set_sp; // Cantidad de modos que no se muestran en la pantalla
-    bool prev_clk = false; // Variable para detectar el cambio de estado del encoder
-    bool clk = false; // Variable para almacenar el estado actual del clk del encoder
-
-    ui_t ui = {
-        .p_oled = &oled,
-        .p_user = &user
-    };
-
-    i2c_guardian_t ui_guardian = {
-        .device = ssd1306_device,
-        .return_queue = NULL,
-        .callback = (void *)i2c_guard_ssd1306,
-        .context = NULL
-    };
-
-    user.sp = 0;
-
-    for(;;){
-        if(xQueueReceive(q_values_to_show, &lux, portMAX_DELAY)){
-
-            xSemaphoreTake(semphr_user, portMAX_DELAY); // Tomo el semáforo para evitar conflictos de acceso al I2C
-                user.lux = lux;
-                
-                if(lux < user.min){
-                    // cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
-                    gpio_put(PIN_LED_GREEN, 0);
-                    gpio_put(PIN_LED_RED, 1);
-                }
-                else if(lux > user.max){
-                    gpio_put(PIN_LED_GREEN, 1);
-                    gpio_put(PIN_LED_RED, 0);
-                    // cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-                }else{
-                    gpio_put(PIN_LED_GREEN, 1);
-                    gpio_put(PIN_LED_RED, 1);
-                }
-                
-            xSemaphoreGive(semphr_user); // Libero el semáforo
-            xQueueSend(q_i2c_guardian, &ui_guardian, 1);
-
-            
-        }
-        vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
 
@@ -784,15 +823,22 @@ int main() {
 
     q_raw_adc_values = xQueueCreate(BUFF_SIZE, sizeof(uint16_t));
     q_values_to_show = xQueueCreate(BUFF_SIZE, sizeof(float));
-    q_control = xQueueCreate(BUFF_SIZE, sizeof(control_t));
+
+    q_lux = xQueueCreate(BUFF_SIZE, sizeof(float));
+    q_control = xQueueCreate(BUFF_SIZE, sizeof(float));
+
+    q_rtc = xQueueCreate(5, sizeof(ds1307_t));
+    q_rtc_config = xQueueCreate(5, sizeof(ds1307_t));
+
     #ifdef PRINT_VALUES_MODE
     q_send_uart = xQueueCreate(BUFF_SIZE, sizeof(float));
     #endif
+    
     q_i2c_guardian = xQueueCreate(BUFF_SIZE, sizeof(i2c_guardian_t));
     q_i2c_bh1750 = xQueueCreate(BUFF_SIZE, sizeof(bh1750_t));
 
     semphr_user = xSemaphoreCreateMutex();
-    set_user_event = xSemaphoreCreateCounting(100,0);
+    set_user_event = xSemaphoreCreateCounting(2,0);
     change_event = xSemaphoreCreateCounting(100,0);
     encoder_event = xQueueCreate(2, sizeof(int));
 
@@ -801,6 +847,16 @@ int main() {
     bh1750_init();
     gpio_config();
     config_pwm(PIN_PWM, PWM_CLK);
+
+    g_rtc.i2c = i2c0;
+    g_rtc.addr = DS1307_ADDRESS;
+    ds1307_init(&g_rtc);
+
+    g_rtc.time.hours = 5;
+    g_rtc.time.day = 2;
+    g_rtc.time.month = 5;
+    g_rtc.time.year = 2025;
+    ds1307_set_time(&g_rtc);
 
     pwm_set_gpio_level(PIN_PWM, 2000);
 
@@ -842,14 +898,16 @@ int main() {
     //     NULL
     // );
 
-    // xTaskCreate(
-    //     send_uart_task,
-    //     "send_uart_task",
-    //     configMINIMAL_STACK_SIZE*2,
-    //     NULL,
-    //     tskIDLE_PRIORITY + 1,
-    //     NULL
-    // );
+    #ifdef PRINT_VALUES_MODE
+    xTaskCreate(
+        send_uart_task,
+        "send_uart_task",
+        configMINIMAL_STACK_SIZE*2,
+        NULL,
+        tskIDLE_PRIORITY + 1,
+        NULL
+    );
+    #endif
 
     xTaskCreate(
         i2c_guardian_task,
@@ -860,14 +918,16 @@ int main() {
         NULL
     );
 
-    xTaskCreate(
-        ui_task,
-        "ui_task",
-        configMINIMAL_STACK_SIZE*2,
-        NULL,
-        tskIDLE_PRIORITY + 1,
-        NULL
-    );
+    xTaskCreate(rtc_task, "RTC Task", configMINIMAL_STACK_SIZE*4, NULL, tskIDLE_PRIORITY+2, NULL);
+
+    // xTaskCreate(
+    //     ui_task,
+    //     "ui_task",
+    //     configMINIMAL_STACK_SIZE*2,
+    //     NULL,
+    //     tskIDLE_PRIORITY + 1,
+    //     NULL
+    // );
 
     xTaskCreate(
         btns_task,
@@ -881,7 +941,7 @@ int main() {
     xTaskCreate(
         user_task,
         "user_task",
-        configMINIMAL_STACK_SIZE*3,
+        configMINIMAL_STACK_SIZE*4,
         NULL,
         tskIDLE_PRIORITY + 1,
         NULL

@@ -14,7 +14,7 @@ enum config_menu_enum{
     second_config,
     day_config,
     month_config,
-    age_config,
+    year_config,
     min_config,
     max_config,
     not_config
@@ -42,7 +42,7 @@ typedef struct{
     uint8_t sencond;
     uint8_t day;
     uint8_t month;
-    uint8_t age;
+    uint8_t year;
     int min;
     int max;
 }user_t;

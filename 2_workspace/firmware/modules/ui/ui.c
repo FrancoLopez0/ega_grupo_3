@@ -35,25 +35,25 @@ void ui_init(ssd1306_t *p_oled, i2c_inst_t *i2c, user_t *p_user){
  */
 void ui_update(ssd1306_t *p_oled, user_t *p_user){
     
-    switch (p_user->menu)
-    {
-        case params_menu:
-            ui_update_params(p_oled, p_user);
-            ui_update_bar(p_oled, &bar, p_user);
-            ui_update_user_sp(p_oled,&bar, p_user->sp);
-        break;
+    // switch (p_user->menu)
+    // {
+    //     case params_menu:
+    //         ui_update_params(p_oled, p_user);
+    //         ui_update_bar(p_oled, &bar, p_user);
+    //         ui_update_user_sp(p_oled,&bar, p_user->sp);
+    //     break;
         
-        case config_menu:
+    //     case config_menu:
             ui_user_config(p_oled, p_user);
-        break;
+    //     break;
 
-        case log_menu:
-            ui_logs(p_oled, p_user);
-        break;
+    //     case log_menu:
+    //         ui_logs(p_oled, p_user);
+    //     break;
 
-        default:
-            break;
-    }
+    //     default:
+    //         break;
+    // }
     
     ssd1306_show(p_oled);
 }
@@ -97,7 +97,7 @@ void ui_user_config(ssd1306_t *p_oled, user_t *p_user){
     char time[10], min[10], max[10], date[10];
 
     sprintf(time, "%02d:%02d:%02d", p_user->hour, p_user->minute, p_user->sencond);
-    sprintf(date, "%02d/%02d/%02d", p_user->day, p_user->month, p_user->age);
+    sprintf(date, "%02d/%02d/%02d", p_user->day, p_user->month, p_user->year);
     sprintf(min, "min:%d", p_user->min);
     sprintf(max, "max:%d", p_user->max);
 
@@ -149,7 +149,7 @@ void ui_user_config(ssd1306_t *p_oled, user_t *p_user){
         case month_config:
             ssd1306_invert_square(p_oled, 38+18, 22, 13, 10);
             break;
-        case age_config:
+        case year_config:
             ssd1306_invert_square(p_oled, 38*2 - 1, 22, 13, 10);
             break;      
         case min_config:
@@ -179,7 +179,7 @@ void ui_user_config(ssd1306_t *p_oled, user_t *p_user){
         case month_config:
             ssd1306_draw_empty_square(p_oled, 38+18, 22, 13, 10);
             break;
-        case age_config:
+        case year_config:
             ssd1306_draw_empty_square(p_oled, 38*2 - 1, 22, 13, 10);
             break;      
         case min_config:
