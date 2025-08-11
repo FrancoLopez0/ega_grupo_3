@@ -35,25 +35,25 @@ void ui_init(ssd1306_t *p_oled, i2c_inst_t *i2c, user_t *p_user){
  */
 void ui_update(ssd1306_t *p_oled, user_t *p_user){
     
-    // switch (p_user->menu)
-    // {
-    //     case params_menu:
-    //         ui_update_params(p_oled, p_user);
-    //         ui_update_bar(p_oled, &bar, p_user);
-    //         ui_update_user_sp(p_oled,&bar, p_user->sp);
-    //     break;
+    switch (p_user->menu)
+    {
+        case params_menu:
+            ui_update_params(p_oled, p_user);
+            ui_update_bar(p_oled, &bar, p_user);
+            ui_update_user_sp(p_oled,&bar, p_user->sp);
+        break;
         
-    //     case config_menu:
+        case config_menu:
             ui_user_config(p_oled, p_user);
-    //     break;
+        break;
 
-    //     case log_menu:
-    //         ui_logs(p_oled, p_user);
-    //     break;
+        case log_menu:
+            ui_logs(p_oled, p_user);
+        break;
 
-    //     default:
-    //         break;
-    // }
+        default:
+            break;
+    }
     
     ssd1306_show(p_oled);
 }

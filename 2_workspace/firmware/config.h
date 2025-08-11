@@ -10,7 +10,8 @@
 
 #define PIN_PWM 1
 
-#define MAX_SET_POINT 3000
+#define MAX_SET_POINT 1500
+#define MIN_SET_POINT 100
 #define MAX_RISE_TIME 10000 // 10 segundos
 #define PWM_WRAP      4095
 
@@ -19,3 +20,17 @@
 #define PIN_LED_GREEN 4
 
 #define PIN_BTN 21
+
+//==========================CONTROL=====================================
+
+#define KP 0.07f
+#define KI 0.60f
+#define KD 0.006f
+
+//===========================DEBUG======================================
+
+// #define PRINT_VALUES_MODE
+#define DEBUG_CONTROL
+// #define DEBUG_LEDS
+// #define DEBUG_GET_LUX
+// #define DEBUG_I2C

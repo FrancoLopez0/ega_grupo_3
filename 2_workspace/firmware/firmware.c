@@ -1,12 +1,12 @@
 /**
  * @file firmware.c
  * @author Franco Lopez & Matias Pietras (francoalelopez@gmail.com mati_pietras@yahoo.com.ar)
- * @brief 
+ * @brief
  * @version 0.1
  * @date 2025-06-30
- * 
+ *
  * @copyright Copyright (c) 2025
- * 
+ *
  */
 #include <stdio.h>
 #include "pico/stdlib.h"
@@ -69,7 +69,7 @@ typedef struct{
 enum i2c_devices_t {
     bh1750_device,
     ssd1306_device,
-    rtc_device
+    rtc_device,
 };
 
 typedef struct{
@@ -98,11 +98,11 @@ user_t user = {
     .lux = MAX_LUX/2,
     .select = set_sp,
     .change_value_mode = false,
-    .rise_time_ms = 1000,
+    .rise_time_ms = 0,
     .sp_f = 2000,
-    .menu = config_menu,
-    .min = 100,
-    .max = 2500,
+    .menu = params_menu,
+    .min = MIN_SET_POINT,
+    .max = MAX_SET_POINT,
     .day = 5,
     .month = 8,
     .year = 25,
@@ -135,6 +135,9 @@ void i2c_guardian_task(void *params){
                     xQueueSend(guardian.return_queue, guardian.context, 1);
                 }
         }
+        #ifdef DEBUG_I2C
+            printf("Keep alive: %d \n", guardian.device);
+        #endif
         vTaskDelay(pdMS_TO_TICKS(10)); // Evita que la tarea consuma todo el tiempo de CPU
     }
 }
@@ -179,8 +182,8 @@ float kalman_update(float z, float R, float Q, float *x_est, float *P) {
 
 /**
  * @brief Tarea que se encarga de enviar las solicitudes a la tarea guardiana I2C
- * 
- * @param pvParameters 
+ *
+ * @param pvParameters
  */
 void rtc_task(void *pvParameters){
     i2c_guardian_t guardian;
@@ -209,29 +212,29 @@ void rtc_task(void *pvParameters){
 
 /**
  * @brief Tarea encargada de realizar el control de luminosidad
- * 
- * @param params 
+ *
+ * @param params
  */
 void control_task(void *params){
-    
+
     float value_to_control = 0;
-    float kd = 0.0f;
-    float kp = 0.15;
-    float ki = 0.5;
+    float kd = KD;
+    float kp = KP;
+    float ki = KI;
     float error, prev_error, diferential_error, integral_error;
     float prev_time;
     float dt;
     uint16_t pwm;
     float h = PWM_WRAP / MAX_SET_POINT;
     float pid;
-    float set_point = 0;
-    
+    int set_point = 0;
+
     for(;;){
 
         xQueueReceive(q_control, &set_point, 0);
         xQueueReceive(q_lux, &value_to_control, portMAX_DELAY);
 
-        error = set_point - value_to_control;
+        error = (float)set_point - value_to_control;
 
         dt = (float)pdTICKS_TO_MS(xTaskGetTickCount())/1000.0 - prev_time;
 
@@ -251,9 +254,12 @@ void control_task(void *params){
             pwm = 0;
         }
 
-        // printf("PID:%.2f PWM:%d error: %.2f lux:%.2f\n", pid, pwm, error, value_to_control);
+        #ifdef DEBUG_CONTROL
+            printf("PID:%.2f PWM:%d error: %.2f lux:%.2f set point:%d\n", pid, pwm, error, value_to_control, set_point);
+        #endif
 
         pwm_set_gpio_level(PIN_PWM,PWM_WRAP - pwm);
+        // pwm_set_gpio_level(PIN_PWM, 4095);
 
         prev_time = (float)pdTICKS_TO_MS(xTaskGetTickCount())/1000.0;
 
@@ -263,8 +269,8 @@ void control_task(void *params){
 
 /**
  * @brief Tarea que controla la luminosidad del Led y envia los datos a graficar
- * 
- * @param params 
+ *
+ * @param params
  */
 void central_task(void *params){
     // Control
@@ -294,55 +300,56 @@ void central_task(void *params){
     float Q = 0.01f;     // Ruido de proceso (ajustable)
     float R = 0.5f;      // Ruido de medición (depende del TMT6000 y el ADC)
 
+    float prom = 0.0;
+
     adc_run(true);
+
+    // for(int i=0; i<=100; i++){
+    //     if(xQueueReceive(q_raw_adc_values, &raw_adc_values, portMAX_DELAY)){
+    //         lux_temt6000 = temt6000_get_raw_lux(raw_adc_values);
+    //         lux = kalman_update(lux_temt6000, R, Q, &x_est, &P); // Filtro de Kalman
+    //         if(xQueueReceive(q_i2c_bh1750, &bh1750, portMAX_DELAY))
+    //         {
+    //             prom += lux/(float)bh1750.lux;
+    //             printf("Calib: %f\n",prom);
+    //         }
+    //     }
+    //     adc_irq_set_enabled(true);
+    //     adc_run(true);
+    // }
+
+    // prom /= 100.0;
+
+    // temt6000_set_calib(prom);
+
+    // xQueueReset(q_raw_adc_values);
 
     for(;;){
         if(xQueueReceive(q_raw_adc_values, &raw_adc_values, portMAX_DELAY)){
 
-            
+
             lux_temt6000 = temt6000_get_lux(raw_adc_values);
+
+            
+            lux = kalman_update(lux_temt6000, R, Q, &x_est, &P); // Filtro de Kalman
             
             if(xQueueReceive(q_i2c_bh1750, &bh1750, 0) == pdPASS)
             {
-                // printf("bh1750: %d tmt6000: %.2f\n", bh1750.lux, lux_temt6000);
-                // lux = kalman_update(bh1750.lux, 0.1, Q, &x_est, &P);
+                lux = ((float)bh1750.lux) * 0.8 + lux * 0.2;
             }
-
-            lux = kalman_update(lux_temt6000, R, Q, &x_est, &P); // Filtro de Kalman
-
-            prev_lux = lux;
-
             xQueueSend(q_lux, &lux, portMAX_DELAY);
 
-            // error = set_point - lux;
-
-            // control.input = lux;
-            // control.set_point = 3000.0; //MIN 80 MAX 3000
-
-            // control.set_point += 1.0;
-            // if(control.set_point > 3000) control.set_point = 80.0;
-
-            // xSemaphoreTake(semphr_user, portMAX_DELAY);
-            //     user.sp = control.set_point;
-            //     // control.set_point = user.sp;
-            // xSemaphoreGive(semphr_user);
-
-            // printf("LUX DESDE CENTRAL: %.2f \n", control.input);
-
-            // xQueueSend(q_control, &control, portMAX_DELAY);
-
-            // pwm += (kp * error + kd * delta_error / 1000) * h; // Calculo el pwm a aplicar
-
-            // pwm_set_gpio_level(PIN_PWM,PWM_WRAP - (uint16_t)pwm);
-
-            // printf("pwm: %d  error: %f \n",pwm, error);
+            #ifdef DEBUG_GET_LUX
+                // xQueueSend(q_send_uart, &lux, portMAX_DELAY); // Envio el valor de lux a la tarea que envia por UART
+                printf("TEMT6000: %f, BH1750: %d, cte: %f\n", lux_temt6000, bh1750.lux, lux_temt6000/(float)bh1750.lux);
+            #endif
 
             c++;
-            // xQueueSend(q_send_uart, &lux, portMAX_DELAY); // Envio el valor de lux a la tarea que envia por UART
 
             if(c==MAX_COUNT){ // Cada una cierta cantidad de muestras enviare la muestra a la tarea que se encarga de la ui
                 c = 0;
                 xQueueSend(q_values_to_show, &lux, portMAX_DELAY);
+                printf("%f\n",lux);
             }
 
             adc_irq_set_enabled(true);
@@ -355,8 +362,8 @@ void central_task(void *params){
 #ifdef PRINT_VALUES_MODE
 /**
  * @brief Envia los datos por UART
- * 
- * @param params 
+ *
+ * @param params
  */
 void send_uart_task(void *params){
     float serial_value;
@@ -372,7 +379,7 @@ void send_uart_task(void *params){
 int encoder_increment(encoder_t *encoder) {
     if(!encoder->clk && encoder->prev_clk) {
         TickType_t now = xTaskGetTickCount();
-        
+
         // Filtro de debounce: solo aceptamos el flanco si ha pasado el tiempo mínimo
         if((now - encoder->last_valid_edge) > encoder->debounce_time) {
             encoder->last_valid_edge = now;
@@ -386,22 +393,22 @@ int encoder_count(encoder_t *encoder) {
     int increment = 0; // Valor de incremento basado en la velocidad de rotación
     if(!encoder->clk && encoder->prev_clk) {
         TickType_t now = xTaskGetTickCount();
-        
+
         // Filtro de debounce: solo aceptamos el flanco si ha pasado el tiempo mínimo
         if((now - encoder->last_valid_edge) > encoder->debounce_time) {
             encoder->last_valid_edge = now;
-            
+
             // Cálculo de velocidad (solo si es un flanco válido)
             encoder->current_edge_time = now;
             TickType_t rotation_period = encoder->current_edge_time - encoder->last_edge_time;
             encoder->last_edge_time = encoder->current_edge_time;
-            
+
             // Cálculo del incremento basado en velocidad
             if(rotation_period < pdMS_TO_TICKS(200)) increment = 50;
             else if(rotation_period < pdMS_TO_TICKS(300)) increment = 20;
             else if(rotation_period < pdMS_TO_TICKS(400)) increment = 10;
             else increment = 1;
-            
+
             return increment * (encoder->dt ? 1 : -1); // Retorna el incremento o decremento según el estado del dt
         }
     }
@@ -410,8 +417,8 @@ int encoder_count(encoder_t *encoder) {
 
 /**
  * @brief Muestra y maneja la interfaz de usuario
- * 
- * @param params 
+ *
+ * @param params
  */
 void user_task(void *params) {
 
@@ -420,7 +427,7 @@ void user_task(void *params) {
     user.sp = 0;
     int set_point = 0;
     int delta_time = 0, last_time = 0;
-    
+
     //  Encoder
     int encoder_increment = 0;
     uint8_t set_user_event_count;
@@ -467,14 +474,14 @@ void user_task(void *params) {
             // printf("%02d:%02d:%02d\n", user_view.hour, user_view.minute, user_view.sencond);
         }
 
-        user_view.menu = config_menu;//uxSemaphoreGetCount(change_event) % 3; // Tomo la cantidad de veces que se presiono el boton de cambio de menu
+        user_view.menu = uxSemaphoreGetCount(change_event) % 3; // Tomo la cantidad de veces que se presiono el boton de cambio de menu
         user.menu = user_view.menu;
 
         if(set_user_event_count % 2 == 1){
             motion = false;
             ui.p_user = &user_view;
             user_view.change_value_mode = true; // Indico que se esta cambiando el valor del usuario
-            
+
             if(user_view.menu == params_menu){
                 switch (user_view.select)
                 {
@@ -517,7 +524,7 @@ void user_task(void *params) {
                     case hour_config:
                         if(user_view.hour + encoder_increment >0)
                             user_view.hour += encoder_increment;
-                        user_view.hour %= 60;
+                        user_view.hour %= 24;
                         rtc.time.hours = user_view.hour;
                     break;
                     case second_config:
@@ -574,17 +581,17 @@ void user_task(void *params) {
             user.select = user_view.select;
             encoder_increment = 0;
         }
-        
+
         if(uxSemaphoreGetCount(set_user_event)==100){
             xQueueReset(set_user_event);
         }
 
         delta_time = pdTICKS_TO_MS(xTaskGetTickCount()) - last_time;
-        
+
         if(delta_time >= user_view.rise_time_ms){
             last_time = pdTICKS_TO_MS(xTaskGetTickCount());
         }
-        
+
         if(user.rise_time_ms >0){
             set_point = (int)(((float)(set_point_final - set_point_0) / (float)user.rise_time_ms) * (float)delta_time) + set_point_0;
             user.sp = set_point;
@@ -592,7 +599,7 @@ void user_task(void *params) {
         else{
             set_point = user.sp;
         }
-        
+
         // printf("set_point: %d rise_time: %d set_point_final: %d\n", set_point, user.rise_time_ms, user.sp_f);
 
         if(set_user_event_count % 2 == 0 && set_user_event_count != 0){ // Si es multiplo de 2
@@ -601,7 +608,6 @@ void user_task(void *params) {
             // user.sp_f = user_view.sp_f;
             user = user_view;
             xQueueSend(q_rtc_config, &rtc, portMAX_DELAY);
-
 
             set_point_0 = user.sp;
             set_point_final = user.sp_f;
@@ -613,11 +619,11 @@ void user_task(void *params) {
             motion = true;
             xQueueReset(set_user_event);
         }
-       
+
         xQueueSend(q_control, &set_point, portMAX_DELAY);
 
         if(xQueueReceive(q_values_to_show, &lux, 0) == pdPASS){
-                
+
                 ui.p_user->lux = lux;
 
                 if(lux < user.min){
@@ -633,8 +639,8 @@ void user_task(void *params) {
                     gpio_put(PIN_LED_GREEN, 1);
                     gpio_put(PIN_LED_RED, 1);
                 }
-            xQueueSend(q_i2c_guardian, &ui_guardian, 1);
-        }
+                xQueueSend(q_i2c_guardian, &ui_guardian, 1);
+            }
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -642,8 +648,8 @@ void user_task(void *params) {
 
 /**
  * @brief Tarea encargada de la revision del estado de los botones
- * 
- * @param params 
+ *
+ * @param params
  */
 void btns_task(void *params) {
     // Encoder
@@ -701,9 +707,16 @@ void btns_task(void *params) {
     }
 }
 
+void storage_task(void *params) {
+
+    while(true){
+
+    }
+}
+
 /**
  * @brief Interrupcion que inicia la conversion del adc
- * 
+ *
  */
 void IRQ_ReadAdcFifo(){
     adc_irq_set_enabled(false);
@@ -712,12 +725,12 @@ void IRQ_ReadAdcFifo(){
     adc_fifo_drain();
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     xQueueSendFromISR(q_raw_adc_values, &adc_raw_values, &xHigherPriorityTaskWoken);
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);                                         
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 /**
  * @brief Configura el I2C
- * 
+ *
  */
 void i2c_config(void){
     i2c_init(I2C_PORT, I2C_FREQ);
@@ -729,10 +742,10 @@ void i2c_config(void){
 
 /**
  * @brief Configura el boton de seleccion
- * 
+ *
  */
 void gpio_config(void){\
-    
+
     // gpio_init(SELECT_BTN);
     // gpio_set_dir(SELECT_BTN, GPIO_IN);
     // gpio_pull_up(SELECT_BTN);
@@ -758,7 +771,7 @@ void gpio_config(void){\
     gpio_init(PIN_LED_RED);
     gpio_set_dir(PIN_LED_RED, GPIO_OUT);
     gpio_pull_up(PIN_LED_RED);
-    
+
     // gpio_set_irq_enabled_with_callback(
     //     SW,
     //     GPIO_IRQ_EDGE_FALL,
@@ -769,10 +782,10 @@ void gpio_config(void){\
 
 /**
  * @brief Configura el controlador del pwm
- * 
- * @param pin 
- * @param clk 
- * @return uint 
+ *
+ * @param pin
+ * @param clk
+ * @return uint
  */
 uint config_pwm(uint16_t pin, float clk){
 
@@ -783,19 +796,19 @@ uint config_pwm(uint16_t pin, float clk){
     pwm_config config = pwm_get_default_config();
 
     // pwm_config_set_wrap(&config, 4096U);
-    
+
     pwm_config_set_clkdiv(&config, 1.25f);
-    
+
     pwm_init(slice_num, &config, true);
-    
+
     pwm_set_wrap(slice_num, 4096U);
-    
+
     return slice_num;
 }
 
 /**
  * @brief Configuro el ADC
- * 
+ *
  */
 void adc_config(){
     adc_init();                                     // Inicio el periferico
@@ -808,12 +821,12 @@ void adc_config(){
         1,        // Genera solicitud DMA o IRQ al tener al menos 1 muestra
         false,     // Desactivo el bit de error
         false      // El registro va a contener un dato de mas de un byte, sera de 16bit aunque el adc es de 12bit
-    );    
+    );
 
     adc_set_clkdiv(ADC_CLK_BASE/(float)SAMPLE_RATE);        // Seteo el sample rate del adc
-    
+
     irq_set_exclusive_handler(ADC_IRQ_FIFO, IRQ_ReadAdcFifo);
-    
+
     adc_irq_set_enabled(true);
     irq_set_enabled(ADC_IRQ_FIFO, true);
 }
@@ -822,7 +835,7 @@ int main() {
     stdio_init_all();
 
     q_raw_adc_values = xQueueCreate(BUFF_SIZE, sizeof(uint16_t));
-    q_values_to_show = xQueueCreate(BUFF_SIZE, sizeof(float));
+    q_values_to_show = xQueueCreate(BUFF_SIZE*5, sizeof(float));
 
     q_lux = xQueueCreate(BUFF_SIZE, sizeof(float));
     q_control = xQueueCreate(BUFF_SIZE, sizeof(float));
@@ -833,7 +846,7 @@ int main() {
     #ifdef PRINT_VALUES_MODE
     q_send_uart = xQueueCreate(BUFF_SIZE, sizeof(float));
     #endif
-    
+
     q_i2c_guardian = xQueueCreate(BUFF_SIZE, sizeof(i2c_guardian_t));
     q_i2c_bh1750 = xQueueCreate(BUFF_SIZE, sizeof(bh1750_t));
 
@@ -852,22 +865,24 @@ int main() {
     g_rtc.addr = DS1307_ADDRESS;
     ds1307_init(&g_rtc);
 
-    g_rtc.time.hours = 5;
-    g_rtc.time.day = 2;
-    g_rtc.time.month = 5;
-    g_rtc.time.year = 2025;
-    ds1307_set_time(&g_rtc);
+    // g_rtc.time.hours = 5;
+    // g_rtc.time.day = 2;
+    // g_rtc.time.month = 5;
+    // g_rtc.time.year = 2025;
+    // ds1307_set_time(&g_rtc);
 
     pwm_set_gpio_level(PIN_PWM, 2000);
 
     if (cyw43_arch_init()) {
         printf("Wi-Fi init failed\n");
-    }    
+    }
 
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
 
-    oled.external_vcc = false;
-    ui_init(&oled, I2C_PORT, &user);
+    #ifndef PRINT_VALUES_MODE
+        oled.external_vcc = false;
+        ui_init(&oled, I2C_PORT, &user);
+    #endif
 
     uint8_t c = 0;
 
@@ -918,7 +933,7 @@ int main() {
         NULL
     );
 
-    xTaskCreate(rtc_task, "RTC Task", configMINIMAL_STACK_SIZE*4, NULL, tskIDLE_PRIORITY+2, NULL);
+    xTaskCreate(rtc_task, "RTC Task", configMINIMAL_STACK_SIZE*4, NULL, tskIDLE_PRIORITY+1, NULL);
 
     // xTaskCreate(
     //     ui_task,
@@ -952,13 +967,15 @@ int main() {
         "control_task",
         configMINIMAL_STACK_SIZE*3,
         NULL,
-        tskIDLE_PRIORITY + 1,
+        tskIDLE_PRIORITY + 2,
         NULL
     );
 
     vTaskStartScheduler();
-    
+
     while (1) {
+        // printf("HOLAAAAA\n");
+
         // printf("Lux TEMT6000:%f\n", temt6000_get_lux());
         // uint16_t lux = bh1750_read_lux();
         // printf("Luz BH1750: %u lux\n", lux);
@@ -966,11 +983,10 @@ int main() {
         // user.sp = (user.sp==0) ? MAX_SP:(user.sp - 1);
 
         // ui_update(&oled, &user);
-        
+
         // user.select = (c==20) ? (user.select + 1)%(not_show) : user.select;
         // c = (c+1)%21;
 
-        // sleep_ms(150);
+        sleep_ms(1000);
     }
 }
-
