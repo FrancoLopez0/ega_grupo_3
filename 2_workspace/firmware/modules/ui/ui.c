@@ -4,6 +4,7 @@ static const uint8_t lux_x = 1, lux_y = 30;
 static const uint8_t number_w = 65;
 static const uint8_t time_x = number_w, time_y = lux_y;
 static const uint8_t sp_x = lux_x + 5, sp_y = 4 + lux_y + 10;
+static const uint8_t width_hour=30, height_hour=22, origin_hour_x=10, origin_hour_y=0;
 
 bar_t bar = DEFAULT_BAR;
 
@@ -63,28 +64,68 @@ void ui_logs(ssd1306_t *p_oled, user_t *p_user){
 
     ssd1306_clear(p_oled);
 
-    for(int i=0; i<3; i++){
-        sprintf(log, "%02d:%02d:%02d - %02d/%02d/%02d", 0, 36, 3, 5, 8, 25);
-        sprintf(value, "lux:%d", 5);
+    ssd1306_draw_string(
+        p_oled,
+        origin_hour_x, origin_hour_y + 10,
+        2,
+        "Send data"
+    );
 
-        ssd1306_draw_string(
-            p_oled,
-            5, 5 + i*25,
-            1,
-            log
-        );
+    ssd1306_draw_string(
+        p_oled,
+        origin_hour_x-5, origin_hour_y + 30,
+        2,
+        "Erase data"
+    );
 
-        ssd1306_draw_string(
-            p_oled,
-            5, 5 + i*25 + 10,
-            1,
-            value
-        );
+    if(!p_user->change_value_mode){
+        switch (p_user->select)
+        {
+        case 1:
+            ssd1306_invert_square(p_oled, 0, origin_hour_y + 8, 124, height_hour);
+            break;
+        case 2:
+            break;
+        default:
+            ssd1306_invert_square(p_oled, 0, origin_hour_y + 30 - 3, 124, height_hour);
+            break;
+        }
     }
+    else{
+        switch (p_user->select)
+        {
+        case 1:
+            ssd1306_draw_square(p_oled, origin_hour_x-5, origin_hour_y + 10, 113, height_hour);
+            break;
+        case 2:
+            break;
+        default:
+            ssd1306_draw_square(p_oled, origin_hour_x-5, origin_hour_y + 30, 113, height_hour);
+            break;
+        }
+    }
+
+    // for(int i=0; i<3; i++){
+    //     sprintf(log, "%02d:%02d:%02d - %02d/%02d/%02d", 0, 36, 3, 5, 8, 25);
+    //     sprintf(value, "lux:%d", 5);
+
+    //     ssd1306_draw_string(
+    //         p_oled,
+    //         5, 5 + i*25,
+    //         1,
+    //         log
+    //     );
+
+    //     ssd1306_draw_string(
+    //         p_oled,
+    //         5, 5 + i*25 + 10,
+    //         1,
+    //         value
+    //     );
+    // }
 
 }
 
-static const uint8_t width_hour=30, height_hour=22, origin_hour_x=10, origin_hour_y=0;
 
 /**
  * @brief Dibuja la configuracion de usuario

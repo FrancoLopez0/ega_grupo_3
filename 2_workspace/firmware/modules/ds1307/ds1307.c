@@ -52,7 +52,7 @@ bool get_time_from_rtc(rtc_time_t *time) {
     time->day     = bcd_to_bin(buffer[3]);
     time->date    = bcd_to_bin(buffer[4]);
     time->month   = bcd_to_bin(buffer[5]);
-    time->year    = 2000 + bcd_to_bin(buffer[6]);  // Año estimado (no exacto)
+    time->year    = bcd_to_bin(buffer[6]);  // Año estimado (no exacto)
 
     return true;
 }
@@ -65,18 +65,25 @@ static uint8_t bin_to_bcd(uint8_t val) {
     return ((val / 10) << 4) | (val % 10);
 }
 
+bool set_time_to_rtc(const rtc_time_t *time) {
+    uint8_t buffer[8];
+
+    buffer[0] = 0x00; // Dirección inicial de escritura en el RTC
+    buffer[1] = bin_to_bcd(time->seconds);
+    buffer[2] = bin_to_bcd(time->minutes);
+    buffer[3] = bin_to_bcd(time->hours);        // Modo 24h
+    buffer[4] = bin_to_bcd(time->day);          // Día de la semana (1=Dom, 7=Sáb)
+    buffer[5] = bin_to_bcd(time->date);         // Día del mes
+    buffer[6] = bin_to_bcd(time->month);
+    buffer[7] = bin_to_bcd(time->year % 100);   // Solo los últimos 2 dígitos del año
+
+    int written = i2c_write_blocking(i2c0, DS1307_ADDRESS, buffer, 8, false);
+    return written == 8;
+}
+
 void ds1307_set_time(ds1307_t *ds1307){
-    uint8_t buffer[7];
-
-    buffer[0] = bin_to_bcd(ds1307->time.seconds) & 0x7F;
-    buffer[1] = bin_to_bcd(ds1307->time.minutes);
-    buffer[2] = bin_to_bcd(ds1307->time.hours);        // 24h
-    buffer[3] = bin_to_bcd(ds1307->time.day);          // 1=Dom, 7=Sáb
-    buffer[4] = bin_to_bcd(ds1307->time.date);         
-    buffer[5] = bin_to_bcd(ds1307->time.month);
-    buffer[6] = bin_to_bcd(ds1307->time.year % 100);
-
-    ds1307_write(0x00, buffer, 7);
+    set_time_to_rtc(&(ds1307->time));
+    // ds1307_write(0x00, buffer, 7);
 }
 
 // int main() {

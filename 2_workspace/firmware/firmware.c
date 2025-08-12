@@ -18,6 +18,7 @@
 #include "modules/bh1750/bh1750.h"
 #include "modules/ui/ui.h"
 #include "modules/ds1307/ds1307.h"
+#include "modules/flash/flash.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -79,17 +80,16 @@ typedef struct{
     void * context;
 }i2c_guardian_t;
 
-QueueHandle_t q_raw_adc_values, q_values_to_show, q_control, q_lux, q_rtc, q_rtc_config;
+QueueHandle_t q_raw_adc_values, q_values_to_show, q_control, q_lux, q_rtc, q_rtc_config, q_to_storage, q_user_config;
 
 ds1307_t g_rtc;
 
 #ifdef PRINT_VALUES_MODE
 QueueHandle_t q_send_uart;
 #endif
-
 QueueHandle_t q_i2c_guardian;
-QueueHandle_t q_i2c_bh1750;
-SemaphoreHandle_t semphr_user, set_user_event, encoder_event, change_event;
+QueueHandle_t q_bh1750;
+SemaphoreHandle_t set_user_event, encoder_event, change_event, read_logs_event, erase_logs_event;
 ssd1306_t oled;
 
 user_t user = {
@@ -142,23 +142,16 @@ void i2c_guardian_task(void *params){
     }
 }
 
-void bh1750_task(void *params){
-    bh1750_t bh1750_context = {
-        .lux = 0
-    };
-    i2c_guardian_t bh1750_guardian = {
-        .device = bh1750_device,
-        .return_queue = q_i2c_bh1750,
-        .callback = (void *)i2c_guard_bh1750,
-        .context = &bh1750_context
-    };
-
-    for(;;){
-        xQueueSend(q_i2c_guardian, &bh1750_guardian, portMAX_DELAY);
-        vTaskDelay(pdMS_TO_TICKS(BH1750_SAMPLE_TIME_MS));
-    }
-}
-
+/**
+ * @brief Funcion encargada de filtrar los datos de iluminacion
+ * 
+ * @param z 
+ * @param R 
+ * @param Q 
+ * @param x_est 
+ * @param P 
+ * @return float 
+ */
 float kalman_update(float z, float R, float Q, float *x_est, float *P) {
     // z: nueva medición
     // R: varianza del ruido de medición
@@ -181,7 +174,30 @@ float kalman_update(float z, float R, float Q, float *x_est, float *P) {
 }
 
 /**
- * @brief Tarea que se encarga de enviar las solicitudes a la tarea guardiana I2C
+ * @brief Tarea encargada de enviar solicitudes para leer el bh1750 a la tarea guardiana I2C
+ * 
+ * @param params 
+ */
+void bh1750_task(void *params){
+    bh1750_t bh1750_context = {
+        .lux = 0
+    };
+    i2c_guardian_t bh1750_guardian = {
+        .device = bh1750_device,
+        .return_queue = q_bh1750,
+        .callback = (void *)i2c_guard_bh1750,
+        .context = &bh1750_context
+    };
+
+    for(;;){
+        xQueueSend(q_i2c_guardian, &bh1750_guardian, portMAX_DELAY);
+        vTaskDelay(pdMS_TO_TICKS(BH1750_SAMPLE_TIME_MS));
+    }
+}
+
+
+/**
+ * @brief Tarea encargada de enviar solicitudes para leer el RTC a la tarea guardiana I2C
  *
  * @param pvParameters
  */
@@ -194,6 +210,8 @@ void rtc_task(void *pvParameters){
         .callback = (void *)ds1307_get_time,
         .context = &g_rtc
     };
+
+    char log[64];
 
     while(1){
 
@@ -268,11 +286,11 @@ void control_task(void *params){
 }
 
 /**
- * @brief Tarea que controla la luminosidad del Led y envia los datos a graficar
+ * @brief Tarea que lee los sensores y enviar los datos a graficar y controlar
  *
  * @param params
  */
-void central_task(void *params){
+void get_lux_task(void *params){
     // Control
     int pwm;
     float lux = 0.0f;
@@ -304,26 +322,6 @@ void central_task(void *params){
 
     adc_run(true);
 
-    // for(int i=0; i<=100; i++){
-    //     if(xQueueReceive(q_raw_adc_values, &raw_adc_values, portMAX_DELAY)){
-    //         lux_temt6000 = temt6000_get_raw_lux(raw_adc_values);
-    //         lux = kalman_update(lux_temt6000, R, Q, &x_est, &P); // Filtro de Kalman
-    //         if(xQueueReceive(q_i2c_bh1750, &bh1750, portMAX_DELAY))
-    //         {
-    //             prom += lux/(float)bh1750.lux;
-    //             printf("Calib: %f\n",prom);
-    //         }
-    //     }
-    //     adc_irq_set_enabled(true);
-    //     adc_run(true);
-    // }
-
-    // prom /= 100.0;
-
-    // temt6000_set_calib(prom);
-
-    // xQueueReset(q_raw_adc_values);
-
     for(;;){
         if(xQueueReceive(q_raw_adc_values, &raw_adc_values, portMAX_DELAY)){
 
@@ -333,7 +331,7 @@ void central_task(void *params){
             
             lux = kalman_update(lux_temt6000, R, Q, &x_est, &P); // Filtro de Kalman
             
-            if(xQueueReceive(q_i2c_bh1750, &bh1750, 0) == pdPASS)
+            if(xQueueReceive(q_bh1750, &bh1750, 0) == pdPASS)
             {
                 lux = ((float)bh1750.lux) * 0.8 + lux * 0.2;
             }
@@ -349,7 +347,6 @@ void central_task(void *params){
             if(c==MAX_COUNT){ // Cada una cierta cantidad de muestras enviare la muestra a la tarea que se encarga de la ui
                 c = 0;
                 xQueueSend(q_values_to_show, &lux, portMAX_DELAY);
-                printf("%f\n",lux);
             }
 
             adc_irq_set_enabled(true);
@@ -453,6 +450,7 @@ void user_task(void *params) {
     bool motion = true;
 
     user_view.menu = config_menu;
+    char log[64];
 
     ds1307_t rtc;
 
@@ -468,10 +466,9 @@ void user_task(void *params) {
 
             user_view.year = rtc.time.year;
             user_view.month = rtc.time.month;
-            user_view.day = rtc.time.day;
+            user_view.day = rtc.time.date;
 
             user = user_view;
-            // printf("%02d:%02d:%02d\n", user_view.hour, user_view.minute, user_view.sencond);
         }
 
         user_view.menu = uxSemaphoreGetCount(change_event) % 3; // Tomo la cantidad de veces que se presiono el boton de cambio de menu
@@ -543,7 +540,7 @@ void user_task(void *params) {
                         if(user_view.day + encoder_increment > 0)
                             user_view.day += encoder_increment;
                         user_view.day %= 32;
-                        rtc.time.day = user_view.day;
+                        rtc.time.date = user_view.day;
                     break;
                     case month_config:
                         if(user_view.month + encoder_increment > 0)
@@ -568,6 +565,7 @@ void user_task(void *params) {
                     break;
                 }
             }
+            
             encoder_increment = 0;
         }else{
             user_view.change_value_mode = false;
@@ -577,6 +575,9 @@ void user_task(void *params) {
             }
             if(user_view.menu == config_menu){
                 user_view.select = (user_view.select + encoder_increment) % 9;
+            }
+            if(user_view.menu == log_menu){
+                user_view.select = (user_view.select + encoder_increment) % 2;
             }
             user.select = user_view.select;
             encoder_increment = 0;
@@ -613,7 +614,24 @@ void user_task(void *params) {
             set_point_final = user.sp_f;
 
             ui.p_user = &user;
-
+            
+            if(user.menu == log_menu){
+                switch (user.select)
+                {
+                case 1:
+                    xSemaphoreGive(read_logs_event);
+                    break;
+                default:
+                    xSemaphoreGive(erase_logs_event);
+                    break;
+                }
+            }else{
+                sprintf(log, "%02d:%02d:%02d-%02d/%02d/%02d-lux:%d-sp:%d", user.hour, user.minute, user.sencond, user.day, user.month, user.year, user_view.lux, user.sp);
+                xQueueSend(q_to_storage, log, portMAX_DELAY);
+            }
+            
+            xQueueSend(q_user_config, &user, portMAX_DELAY);
+            
             // printf("Seteado en: \n sp: %d\n sp_f: %d\n rise_time_ms: %d\n", user.sp, user.sp_f, user.rise_time_ms);
 
             motion = true;
@@ -707,10 +725,37 @@ void btns_task(void *params) {
     }
 }
 
+/**
+ * @brief Tarea encargada de manejar la memoria flash
+ * 
+ * @param params 
+ */
 void storage_task(void *params) {
+    char log[64];
+    user_t user_config;
 
     while(true){
-
+        if(xQueueReceive(q_to_storage, log, 0)){
+            save_log(log);
+            #ifdef DEBUG_LOGS
+                printf("LOG GUARDADO! %s\n", log);
+            #endif
+        }
+        if(xSemaphoreTake(read_logs_event, 0)){
+            read_all_logs();
+        }
+        if(xQueueReceive(q_user_config, &user_config, 0)){
+            save_u16_as_bytes((uint16_t)user_config.sp, 0);
+            save_u16_as_bytes((uint16_t)user_config.rise_time_ms, 1);
+            save_u16_as_bytes((uint16_t)user_config.sp_f, 2);
+        }
+        if(xSemaphoreTake(erase_logs_event, 0)){
+            erase_all_logs();
+            save_u16_as_bytes((uint16_t)500, 0);
+            save_u16_as_bytes((uint16_t)0, 1);
+            save_u16_as_bytes((uint16_t)1000, 2);
+        }
+        vTaskDelay(50);
     }
 }
 
@@ -843,17 +888,20 @@ int main() {
     q_rtc = xQueueCreate(5, sizeof(ds1307_t));
     q_rtc_config = xQueueCreate(5, sizeof(ds1307_t));
 
+    q_to_storage = xQueueCreate(10, 64*sizeof(char));
+    q_user_config = xQueueCreate(10, sizeof(user_t));
     #ifdef PRINT_VALUES_MODE
     q_send_uart = xQueueCreate(BUFF_SIZE, sizeof(float));
     #endif
 
     q_i2c_guardian = xQueueCreate(BUFF_SIZE, sizeof(i2c_guardian_t));
-    q_i2c_bh1750 = xQueueCreate(BUFF_SIZE, sizeof(bh1750_t));
+    q_bh1750 = xQueueCreate(BUFF_SIZE, sizeof(bh1750_t));
 
-    semphr_user = xSemaphoreCreateMutex();
     set_user_event = xSemaphoreCreateCounting(2,0);
     change_event = xSemaphoreCreateCounting(100,0);
     encoder_event = xQueueCreate(2, sizeof(int));
+    read_logs_event = xSemaphoreCreateBinary();
+    erase_logs_event = xSemaphoreCreateBinary();
 
     adc_config();
     i2c_config();
@@ -864,12 +912,7 @@ int main() {
     g_rtc.i2c = i2c0;
     g_rtc.addr = DS1307_ADDRESS;
     ds1307_init(&g_rtc);
-
-    // g_rtc.time.hours = 5;
-    // g_rtc.time.day = 2;
-    // g_rtc.time.month = 5;
-    // g_rtc.time.year = 2025;
-    // ds1307_set_time(&g_rtc);
+    ds1307_get_time(&g_rtc);
 
     pwm_set_gpio_level(PIN_PWM, 2000);
 
@@ -884,11 +927,19 @@ int main() {
         ui_init(&oled, I2C_PORT, &user);
     #endif
 
-    uint8_t c = 0;
+    uint16_t values[3];
+
+    for(int i = 0; i < 3; i++) {
+        values[i] = read_log_u16(i);
+    }
+
+    user.sp = values[0];
+    user.rise_time_ms = values[1];
+    user.sp_f = values[2];
 
     xTaskCreate(
-        central_task,
-        "central_task",
+        get_lux_task,
+        "get_lux_task",
         configMINIMAL_STACK_SIZE*3,
         NULL,
         tskIDLE_PRIORITY + 2,
@@ -900,18 +951,18 @@ int main() {
         "bh1750_task",
         configMINIMAL_STACK_SIZE,
         NULL,
-        tskIDLE_PRIORITY + 1,
+        tskIDLE_PRIORITY + 2,
         NULL
     );
 
-    // xTaskCreate(
-    //     bh1750_reader_task,
-    //     "bh1750_reader_task",
-    //     configMINIMAL_STACK_SIZE,
-    //     NULL,
-    //     tskIDLE_PRIORITY + 1,
-    //     NULL
-    // );
+    xTaskCreate(
+        storage_task,
+        "storage_task",
+        configMINIMAL_STACK_SIZE*2,
+        NULL,
+        tskIDLE_PRIORITY+2,
+        NULL
+    );
 
     #ifdef PRINT_VALUES_MODE
     xTaskCreate(
@@ -933,16 +984,14 @@ int main() {
         NULL
     );
 
-    xTaskCreate(rtc_task, "RTC Task", configMINIMAL_STACK_SIZE*4, NULL, tskIDLE_PRIORITY+1, NULL);
-
-    // xTaskCreate(
-    //     ui_task,
-    //     "ui_task",
-    //     configMINIMAL_STACK_SIZE*2,
-    //     NULL,
-    //     tskIDLE_PRIORITY + 1,
-    //     NULL
-    // );
+    xTaskCreate(
+        rtc_task,
+        "RTC Task", 
+        configMINIMAL_STACK_SIZE*4,
+        NULL, 
+        tskIDLE_PRIORITY+1,
+        NULL
+    );
 
     xTaskCreate(
         btns_task,
@@ -974,19 +1023,5 @@ int main() {
     vTaskStartScheduler();
 
     while (1) {
-        // printf("HOLAAAAA\n");
-
-        // printf("Lux TEMT6000:%f\n", temt6000_get_lux());
-        // uint16_t lux = bh1750_read_lux();
-        // printf("Luz BH1750: %u lux\n", lux);
-        // user.lux=lux;
-        // user.sp = (user.sp==0) ? MAX_SP:(user.sp - 1);
-
-        // ui_update(&oled, &user);
-
-        // user.select = (c==20) ? (user.select + 1)%(not_show) : user.select;
-        // c = (c+1)%21;
-
-        sleep_ms(1000);
     }
 }

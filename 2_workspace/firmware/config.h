@@ -30,7 +30,8 @@
 //===========================DEBUG======================================
 
 // #define PRINT_VALUES_MODE
-#define DEBUG_CONTROL
+// #define DEBUG_CONTROL
 // #define DEBUG_LEDS
 // #define DEBUG_GET_LUX
 // #define DEBUG_I2C
+// #define DEBUG_LOGS

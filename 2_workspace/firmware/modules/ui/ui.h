@@ -42,7 +42,7 @@ typedef struct{
     uint8_t sencond;
     uint8_t day;
     uint8_t month;
-    uint8_t year;
+    uint16_t year;
     int min;
     int max;
 }user_t;
