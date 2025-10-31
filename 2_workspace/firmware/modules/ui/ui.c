@@ -247,7 +247,7 @@ void ui_update_params(ssd1306_t *p_oled, user_t *p_user){
 
     char sp_ui[15], lux_ui[15];
 
-    sprintf(sp_ui, "SP:%d", p_user->sp);
+    sprintf(sp_ui, "SP:%d", p_user->sp_0);
     sprintf(lux_ui, "LUX:%d", p_user->lux);
 
     ssd1306_clear_square(p_oled, lux_x-1, lux_y-3, number_w*2, 50);

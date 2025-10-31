@@ -6,8 +6,8 @@ import sys
 
 # Configuración
 PORT = 'COM8'       # Cambiar a tu puerto (ej: '/dev/ttyUSB0' en Linux)
-BAUDRATE = 115200   # Ajustar según el dispositivo
-CSV_FILE = 'led_no_kalman_samples.csv'
+BAUDRATE = 9600     # Ajustar según el dispositivo
+CSV_FILE = 'raw.csv'
 TIMEOUT = 1         # Tiempo de espera para lectura (segundos)
 
 # Variables globales
@@ -63,9 +63,11 @@ def main():
         while running:
 
             line = ser.readline().decode('utf-8').strip()
+            line = line.split(",")
             if line:  # Ignorar líneas vacías
                 try:
                     value = float(line)  # Convertir a float
+                    print(values)
                     timestamps.append(time)  # Registrar timestamp
                     values.append(value)
                     print(f"Valor leído: {value}")  # Opcional: mostrar progreso

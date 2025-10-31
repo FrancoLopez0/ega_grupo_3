@@ -2,12 +2,12 @@
 
 static float g_conversion_factor = 3.3f / (1 << 12);
 
-static float calib = 3300.0f;
+// static float calib = 2300.0f;//3300.0f;
 
-float temt6000_set_calib(float set_calib){
-    calib = set_calib;
-    return calib;
-}
+// float temt6000_set_calib(float set_calib){
+//     calib = set_calib;
+//     return calib;
+// }
 
 /**
  * @brief Inicializa el adc en el pin del temt6000
@@ -50,7 +50,7 @@ float temt6000_get_raw_lux(uint16_t adc_raw){
  * @param voltage
  * @return float lux
  */
-float temt6000_get_lux(uint16_t adc_raw){
+float temt6000_get_lux(uint16_t adc_raw, float calib){
     // float voltage = adc_get_voltage(adc_raw);
     // float current = temt6000_get_current(voltage);
     // return current * DEFAULT_CTE_LUX;

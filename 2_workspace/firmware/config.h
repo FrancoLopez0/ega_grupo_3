@@ -21,11 +21,26 @@
 
 #define PIN_BTN 21
 
+#define DISPLAY_OLED 1
+
+#define HARD_CODE 0
+
+#define LUX_CALIBRATION 0
+
+#define PRINT_CONTROL 0
+#define SET_POINT 1000.f
+#define PRINT_SIZE 500
+
+#define PIN_RX    13 
+#define PIN_TX    12
+
+#define PRINT_RAW_DATA 0
+
 //==========================CONTROL=====================================
 
-#define KP 0.07f
-#define KI 0.60f
-#define KD 0.006f
+#define KP 14.f
+#define KI 5.f//0.60f
+#define KD 0.0f//0.006f
 
 //===========================DEBUG======================================
 

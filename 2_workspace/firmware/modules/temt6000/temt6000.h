@@ -35,8 +35,8 @@ float temt6000_get_current(float voltage);
  * @param voltage
  * @return float lux
  */
-float temt6000_get_lux(uint16_t adc_raw);
+float temt6000_get_lux(uint16_t adc_raw, float calib);
 
-float temt6000_set_calib(float set_calib);
+// float temt6000_set_calib(float set_calib);
 
 float temt6000_get_raw_lux(uint16_t adc_raw);

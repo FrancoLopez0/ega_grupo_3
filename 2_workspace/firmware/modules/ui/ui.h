@@ -3,7 +3,7 @@
 #include "string.h"
 
 #define MAX_SP          600
-#define MAX_LUX         3000
+#define MAX_LUX         1000
 #define OLED_ADDR       0x3C
 
 #define DEFAULT_BAR {.x = 0,.y = 7,.h = 10,.w = 128,.percent = 0}
@@ -31,6 +31,7 @@ typedef struct{
 typedef struct{
     int sp;
     int sp_f;
+    int sp_0;
     int rise_time_ms;
     bool mode;
     uint8_t select;
