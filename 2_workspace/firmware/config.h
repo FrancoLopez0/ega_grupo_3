@@ -11,8 +11,9 @@
 #define PIN_PWM 1
 
 #define MAX_SET_POINT 1500
-#define MIN_SET_POINT 100
+#define MIN_SET_POINT 50
 #define MAX_RISE_TIME 10000 // 10 segundos
+#define MIN_RISE_TIME 100
 #define PWM_WRAP      4095
 
 #define PIN_LED_RED 2
@@ -35,6 +36,9 @@
 #define PIN_TX    12
 
 #define PRINT_RAW_DATA 0
+
+#define ERASE_FLASH 0
+#define SAFE_STATE_SAVE 0
 
 //==========================CONTROL=====================================
 

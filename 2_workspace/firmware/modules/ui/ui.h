@@ -29,10 +29,10 @@ typedef struct{
 }bar_t;
 
 typedef struct{
-    int sp;
-    int sp_f;
-    int sp_0;
-    int rise_time_ms;
+    int16_t sp;
+    int16_t sp_f;
+    int16_t sp_0;
+    int16_t rise_time_ms;
     bool mode;
     uint8_t select;
     uint32_t lux;

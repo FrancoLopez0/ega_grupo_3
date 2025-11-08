@@ -44,6 +44,8 @@ add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/modules/flash)
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/modules/bh1750)
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/modules/ds1307)
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/modules/ui)
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/modules/littlefs-lib)
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/modules/pico-lfs)
 
 pico_set_program_name(firmware "firmware")
 pico_set_program_version(firmware "0.1")
@@ -74,6 +76,8 @@ target_link_libraries(firmware
         hardware_pwm
         hardware_uart
         pico_cyw43_arch_none
+        # littlefs-lib
+        pico-lfs
         )
 
 pico_add_extra_outputs(firmware)

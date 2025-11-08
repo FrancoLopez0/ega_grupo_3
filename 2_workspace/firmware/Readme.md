@@ -20,5 +20,5 @@
 [x] RTC
 
 [ ] Todas las variables de los comandos tienen que ser globales
-[ ] Volver a implementar RTC
+[x] Volver a implementar RTC
 [ ] Volver a escritura en Flash
