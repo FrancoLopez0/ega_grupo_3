@@ -14,6 +14,7 @@
 #include "hardware/adc.h"
 #include "hardware/uart.h"
 #include "hardware/pwm.h"
+#include "hardware/clocks.h"
 #include "pico/cyw43_arch.h"
 
 #include "modules/temt6000/temt6000.h"
@@ -92,7 +93,7 @@ typedef struct{
     bool overwrite;
 }i2c_guardian_t;
 
-QueueHandle_t q_raw_adc_values, q_values_to_show, q_control, q_lux, q_rtc, q_rtc_config, q_to_storage, q_user_config, q_pwm, q_kalman, q_alpha, q_control_params, q_calib_temt, q_kalman_get;
+QueueHandle_t q_raw_adc_values, q_values_to_show, q_control, q_lux, q_rtc, q_rtc_config, q_to_storage, q_user_config, q_pwm, q_kalman, q_alpha, q_control_params, q_calib_temt, q_kalman_get, q_buff_to_print;
 
 TaskHandle_t user_task_handler, get_lux_task_handler, control_task_handler, storage_task_handler;
 
@@ -103,7 +104,7 @@ QueueHandle_t q_send_uart;
 #endif
 QueueHandle_t q_i2c_guardian, q_to_print;
 QueueHandle_t q_bh1750;
-SemaphoreHandle_t set_user_event, encoder_event, change_event, read_logs_event, erase_logs_event;
+SemaphoreHandle_t set_user_event, encoder_event, change_event, read_logs_event, erase_logs_event, toggle_control_event;
 ssd1306_t oled;
 
 user_t user = {
@@ -113,7 +114,7 @@ user_t user = {
     .select = set_sp,
     .change_value_mode = false,
     .rise_time_ms = 0,
-    .sp_f = 2000,
+    .sp_f = 700,
     .menu = params_menu,
     .min = MIN_SET_POINT,
     .max = MAX_SET_POINT,
@@ -390,7 +391,7 @@ void rise_time_set(void *param){
     vTaskSuspend(user_task_handler);
     char *arg = (char *)param;
     int value = atoi(arg);
-    if(value>=MAX_RISE_TIME || value<=MIN_RISE_TIME){ 
+    if((value>=MAX_RISE_TIME || value<=MIN_RISE_TIME) && value!=0){ 
         printf("Value out of range\n");
         vTaskResume(user_task_handler);
         return;
@@ -549,7 +550,7 @@ void calib_set(void *param){
         return;
     }
     calib = value;
-    xQueueOverwrite(q_control_params, &calib);
+    xQueueOverwrite(q_calib_temt, &calib);
     calib_get(NULL);
 }
 
@@ -700,6 +701,15 @@ void logs_get(void *param){
     xTaskNotify(storage_task_handler, (uint32_t)cant, eSetValueWithOverwrite);
 }
 
+void toogle_control(void *param){
+    // xTaskNotify(control_task_handler, E_TOGGLE_CONTROL, eSetValueWithOverwrite);
+    xSemaphoreGive(toggle_control_event);
+}
+
+void init_calib(void *param){
+    xTaskNotify(control_task_handler, E_REQ_CALIB, eSetValueWithOverwrite);
+}
+
 typedef struct {
     char *name;
     command_fn_t set;
@@ -707,6 +717,8 @@ typedef struct {
 }cmd_t;
 
 cmd_t commands[]={
+    {"toggle_control", toogle_control, NULL},
+    {"init_calib", init_calib, NULL},
     {"logs", NULL, logs_get},
     {"user_params", NULL, user_params_get},
     {"pid_params", NULL, pid_params_get},
@@ -745,6 +757,22 @@ void sys_print(const char* msg){
     xQueueSend(q_to_print, msg, portMAX_DELAY);
 }
 
+// ===== HEADERS ====
+
+const char *lux_arr_header = "lux_array";
+
+enum pointer_type{
+    BUFF_FLOAT,
+    BUFF_INT
+};
+
+typedef struct{
+    void *p_buff;
+    int size;
+    enum pointer_type type;
+    char *header;
+}buff_to_print_t;
+
 /**
  * @brief Esta tarea se encarga de manejar la linea de comandos
  * @todo Añadir comandos
@@ -767,7 +795,8 @@ void cli_task(void *params){
     bh1750_t bh1750;
     float temt6000;
     uint16_t adc;
-    bool print_lux = false;
+    bool print_lux = PRINT_LUX;
+    buff_to_print_t buff_to_print;
 
     while(1){
         if (uart_is_readable(UART_ID)) {
@@ -792,6 +821,12 @@ void cli_task(void *params){
 
                 if(strcmp(cmd, "continue") == 0){
                     print_lux = true;
+                    continue;
+                }
+
+                if(strcmp(cmd, "toggle") == 0){
+                    // xTaskNotify(control_task_handler, E_TOGGLE_CONTROL, eSetValueWithOverwrite);
+                    xSemaphoreGive(toggle_control_event);
                     continue;
                 }
 
@@ -868,6 +903,27 @@ void cli_task(void *params){
                 xQueuePeek(q_values_to_show, &lux, portMAX_DELAY);
                 printf("lux: %d, time: 1\n", (uint16_t)lux);
             }
+        }
+
+        if(xQueueReceive(q_buff_to_print, &buff_to_print, 0)){
+            printf(buff_to_print.header);
+            printf(":");
+            switch (buff_to_print.type)
+            {
+            case BUFF_FLOAT:
+                for(int i=0; i<buff_to_print.size; i++){
+                    printf("%.2f, ", ((float *)buff_to_print.p_buff)[i]);
+                }
+                break;
+            case BUFF_INT:
+                for(int i=0; i<buff_to_print.size; i++){
+                    printf("%d, ", ((int *)buff_to_print.p_buff)[i]);
+                }
+                break;
+            default:
+                break;
+            }
+            printf("\n");
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -962,6 +1018,8 @@ void control_task(void *params){
 
     xQueueSend(q_control_params, &pid_params, portMAX_DELAY); // Cargo los parametros en la cola
 
+    char msg[64];
+
     float error, prev_error, diferential_error, integral_error;
     float dt;
     uint16_t pwm = 0;
@@ -978,11 +1036,59 @@ void control_task(void *params){
 
     xQueueOverwrite(q_pwm, &pwm);
 
+    uint32_t event = 4;
+
+    // static float lux_buffer[LUX_BUFFER_SIZE]={0.0};
+
+    // buff_to_print_t buff_to_print = {
+    //     .p_buff = lux_buffer,
+    //     .size = LUX_BUFFER_SIZE,
+    //     .type = BUFF_FLOAT,
+    //     .header = "lux_buffer"
+    // };
+
+    bool pwm_state = true;
+    int toggle_count = 0;
+
     for(;;){
         start_time = get_absolute_time();
+
+        // xTaskNotifyWait(0, 0, &event, 0);
+        
+        // if(event != 0){
+        //     switch (event)
+        //     {
+        //     // case E_REQ_CALIB:
+        //     //         for(int i=0; i<PWM_WRAP;i++){
+        //     //             pwm_set_gpio_level(PIN_PWM,pwm);
+        //     //             xQueueReceive(q_lux, &value_to_control, portMAX_DELAY);
+        //     //             vTaskDelay(pdMS_TO_TICKS(1));   // Lee maxima velocidad ya que el muestreo es a 1.2ms
+        //     //             if(i%4==0){ // Cada 4 valores almaceno un dato en el buffer
+        //     //                 lux_buffer[i/4] = value_to_control;
+        //     //             }
+        //     //         }
+        //     //         xQueueSend(q_buff_to_print, &lux_buffer, portMAX_DELAY);
+        //     //     continue;
+        //     //     break;
+        //     case E_TOGGLE_CONTROL:
+        //             pwm_state = !pwm_state;                    
+        //             event = 0;
+        //         break;
+        //     default:
+        //         break;
+        //     }
+        // }
+
+        if(xSemaphoreTake(toggle_control_event,0)){
+            pwm_state = !pwm_state;
+            sprintf(msg,"control: %d \n", pwm_state);
+            sys_print(msg);
+        }
+
         xQueuePeek(q_control_params, &pid_params, portMAX_DELAY);
         xQueuePeek(q_control, &set_point, portMAX_DELAY);
         xQueueReceive(q_lux, &value_to_control, portMAX_DELAY);
+
 
         #if LUX_CALIBRATION
             if(pwm>=4096) pwm=0;
@@ -1000,8 +1106,8 @@ void control_task(void *params){
 
         integral_error += error * dt;
 
-        if(integral_error>=4096.0){
-            integral_error=4096.0;
+        if(integral_error>=4096.0/h){
+            integral_error=4096.0/h;
         }
 
         pid = error * pid_params.kp + integral_error * pid_params.ki;//+ diferential_error * kd + integral_error * ki;
@@ -1031,8 +1137,10 @@ void control_task(void *params){
         //     continue;
         // }
         
-        pwm_set_gpio_level(PIN_PWM,PWM_WRAP - pwm);
+        // pwm_set_gpio_level(PIN_PWM,pwm);
+        pwm_state ? pwm_set_gpio_level(PIN_PWM,pwm) : pwm_set_gpio_level(PIN_PWM,0);
         // pwm_set_gpio_level(PIN_PWM, 4095);
+        // pwm_set_gpio_level(PIN_PWM,pwm);
 
         prev_time = get_absolute_time();    
         prev_error = error;
@@ -1606,6 +1714,8 @@ void btns_task(void *params) {
     int user_increment = 0; // Variable para almacenar el set point del usuario
     int user_select = set_sp;
 
+    int count = 0;
+
     encoder_t encoder = {
         .clk = false,
         .dt = false,
@@ -1631,6 +1741,12 @@ void btns_task(void *params) {
 
         if(!gpio_get(PIN_BTN)){
             xSemaphoreGive(change_event);
+            printf("change %d\n");
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+
+        if(!gpio_get(PIN_BTN_CTRL)){
+            xSemaphoreGive(toggle_control_event);
             vTaskDelay(pdMS_TO_TICKS(200));
         }
 
@@ -2018,6 +2134,10 @@ void gpio_config(void){\
     gpio_set_dir(PIN_BTN, GPIO_IN);
     gpio_pull_up(PIN_BTN);
 
+    gpio_init(PIN_BTN_CTRL);
+    gpio_set_dir(PIN_BTN_CTRL, GPIO_IN);
+    gpio_pull_up(PIN_BTN_CTRL);
+
     gpio_init(PIN_LED_GREEN);
     gpio_set_dir(PIN_LED_GREEN, GPIO_OUT);
     gpio_pull_up(PIN_LED_GREEN);
@@ -2055,10 +2175,11 @@ uint config_pwm(uint16_t pin, float clk){
     // pwm_config_set_wrap(&config, 4096U);
 
     pwm_config_set_clkdiv(&config, 1.0f);
+    // pwm_config_set_clkdiv(&config, clk_sys/PWM_FREQ);
 
     pwm_init(slice_num, &config, true);
 
-    pwm_set_wrap(slice_num, 4096U);
+    pwm_set_wrap(slice_num, PWM_WRAP);
 
     return slice_num;
 }
@@ -2119,12 +2240,15 @@ int main() {
     q_control_params = xQueueCreate(1, sizeof(control_params_t));
     q_calib_temt = xQueueCreate(1, sizeof(float));
     q_to_print = xQueueCreate(5, sizeof(char)*RESPONSE_MAX_LEN);
+    q_buff_to_print = xQueueCreate(1, sizeof(buff_to_print_t));
 
     set_user_event = xSemaphoreCreateCounting(2,0);
     change_event = xSemaphoreCreateCounting(100,0);
     encoder_event = xQueueCreate(2, sizeof(int));
+    toggle_control_event = xSemaphoreCreateBinary();
     read_logs_event = xSemaphoreCreateBinary();
     erase_logs_event = xSemaphoreCreateBinary();
+
 
     adc_config();
     i2c_config();
@@ -2223,7 +2347,7 @@ int main() {
     xTaskCreate(
         storage_task,
         "storage_task",
-        configMINIMAL_STACK_SIZE*24,
+        configMINIMAL_STACK_SIZE*6,
         NULL,
         tskIDLE_PRIORITY+4,
         &storage_task_handler
@@ -2280,10 +2404,10 @@ int main() {
     xTaskCreate(
         control_task,
         "control_task",
-        configMINIMAL_STACK_SIZE*3,
+        configMINIMAL_STACK_SIZE*4,
         NULL,
         tskIDLE_PRIORITY + 3,
-        &control_task_handler
+        NULL
     );
 
     xTaskCreate(
@@ -2291,7 +2415,7 @@ int main() {
         "cli_task",
         configMINIMAL_STACK_SIZE*4,
         NULL,
-        tskIDLE_PRIORITY + 4,
+        tskIDLE_PRIORITY + 3,
         NULL
     );
 
