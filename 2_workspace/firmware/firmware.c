@@ -16,6 +16,7 @@
 #include "hardware/pwm.h"
 #include "hardware/clocks.h"
 #include "pico/cyw43_arch.h"
+#include "math.h"
 
 #include "modules/temt6000/temt6000.h"
 #include "modules/bh1750/bh1750.h"
@@ -56,6 +57,7 @@ typedef struct{
     bool dt; // Estado del dt del encoder
     bool sw; // Estado del boton del encoder
     bool prev_clk; // Estado anterior del clk del encoder
+    bool prev_dt; // Estado anterior del dt del encoder
     int user_increment; // Incremento del usuario
     int user_select; // Seleccion del usuario
     TickType_t last_valid_edge; // Ultimo flanco valido
@@ -63,6 +65,7 @@ typedef struct{
     TickType_t last_edge_time; // Ultimo tiempo de flanco
     TickType_t current_edge_time; // Tiempo actual de flanco
     TickType_t rotation_period; // Periodo de rotacion
+    TickType_t last_valid_step_time;
 }encoder_t;
 
 typedef struct __attribute__((packed)) {
@@ -494,7 +497,9 @@ void pid_kp_set(void *param){
     xQueuePeek(q_control_params, &pid_params, portMAX_DELAY);
     pid_params.kp = value;
     xQueueOverwrite(q_control_params, &pid_params);
-    pid_kp_get(NULL);
+    vTaskSuspend(user_task_handler);
+    xQueueSend(q_user_config, &user, portMAX_DELAY);
+    vTaskResume(user_task_handler);
 }
 
 void pid_ki_get(void *param){
@@ -510,6 +515,9 @@ void pid_ki_set(void *param){
     xQueuePeek(q_control_params, &pid_params, portMAX_DELAY);
     pid_params.ki = value;
     xQueueOverwrite(q_control_params, &pid_params);
+    vTaskSuspend(user_task_handler);
+    xQueueSend(q_user_config, &user, portMAX_DELAY);
+    vTaskResume(user_task_handler);
     // pid_ki_get(NULL);
 }
 
@@ -526,6 +534,9 @@ void pid_kd_set(void *param){
     xQueuePeek(q_control_params, &pid_params, portMAX_DELAY);// Tomo todos los valores para no modificar los demas
     pid_params.kd = value;
     xQueueOverwrite(q_control_params, &pid_params);
+    vTaskSuspend(user_task_handler);
+    xQueueSend(q_user_config, &user, portMAX_DELAY);
+    vTaskResume(user_task_handler);
     // pid_kd_get(NULL);
 }
 
@@ -706,10 +717,6 @@ void toogle_control(void *param){
     xSemaphoreGive(toggle_control_event);
 }
 
-void init_calib(void *param){
-    xTaskNotify(control_task_handler, E_REQ_CALIB, eSetValueWithOverwrite);
-}
-
 typedef struct {
     char *name;
     command_fn_t set;
@@ -717,8 +724,6 @@ typedef struct {
 }cmd_t;
 
 cmd_t commands[]={
-    {"toggle_control", toogle_control, NULL},
-    {"init_calib", init_calib, NULL},
     {"logs", NULL, logs_get},
     {"user_params", NULL, user_params_get},
     {"pid_params", NULL, pid_params_get},
@@ -854,31 +859,10 @@ void cli_task(void *params){
                     }
                 }
 
-                // // Buscar el parámetro
-                // command_param_t *found = NULL;
-                // for (int i = 0; i < NUM_PARAMS; i++) {
-                //     if (strcmp(arg1, cli_params[i].name) == 0) {
-                //         found = &cli_params[i];
-                //         break;
-                //     }
-                // }
-
-                // // Ejecutar comando
-                // if (strcmp(cmd, "get") == 0 && found->read) {
-                //     cli_get(found);
-                // } else if (strcmp(cmd, "set") == 0 && found->write) {
-                //     if(arg2){
-                //         cli_set(found);
-                //     }
-                // } else {
-                //     printf("Comando no permitido para ese parámetro\n");
-                // }
-
                 if (!found) {
                     printf("Parámetro desconocido: %s\n", arg1);
                     continue;
                 }
-
 
                 index = 0;
 
@@ -1016,8 +1000,8 @@ void control_task(void *params){
         .kd = KD
     };
 
-    xQueueSend(q_control_params, &pid_params, portMAX_DELAY); // Cargo los parametros en la cola
-
+    // xQueueSend(q_control_params, &pid_params, portMAX_DELAY); // Cargo los parametros en la cola
+    xQueuePeek(q_control_params, &pid_params, portMAX_DELAY);
     char msg[64];
 
     float error, prev_error, diferential_error, integral_error;
@@ -1053,32 +1037,6 @@ void control_task(void *params){
     for(;;){
         start_time = get_absolute_time();
 
-        // xTaskNotifyWait(0, 0, &event, 0);
-        
-        // if(event != 0){
-        //     switch (event)
-        //     {
-        //     // case E_REQ_CALIB:
-        //     //         for(int i=0; i<PWM_WRAP;i++){
-        //     //             pwm_set_gpio_level(PIN_PWM,pwm);
-        //     //             xQueueReceive(q_lux, &value_to_control, portMAX_DELAY);
-        //     //             vTaskDelay(pdMS_TO_TICKS(1));   // Lee maxima velocidad ya que el muestreo es a 1.2ms
-        //     //             if(i%4==0){ // Cada 4 valores almaceno un dato en el buffer
-        //     //                 lux_buffer[i/4] = value_to_control;
-        //     //             }
-        //     //         }
-        //     //         xQueueSend(q_buff_to_print, &lux_buffer, portMAX_DELAY);
-        //     //     continue;
-        //     //     break;
-        //     case E_TOGGLE_CONTROL:
-        //             pwm_state = !pwm_state;                    
-        //             event = 0;
-        //         break;
-        //     default:
-        //         break;
-        //     }
-        // }
-
         if(xSemaphoreTake(toggle_control_event,0)){
             pwm_state = !pwm_state;
             sprintf(msg,"control: %d \n", pwm_state);
@@ -1088,7 +1046,6 @@ void control_task(void *params){
         xQueuePeek(q_control_params, &pid_params, portMAX_DELAY);
         xQueuePeek(q_control, &set_point, portMAX_DELAY);
         xQueueReceive(q_lux, &value_to_control, portMAX_DELAY);
-
 
         #if LUX_CALIBRATION
             if(pwm>=4096) pwm=0;
@@ -1100,17 +1057,35 @@ void control_task(void *params){
 
         error = (float)set_point - value_to_control;
 
-        dt = (float)absolute_time_diff_us(prev_time, start_time)/1e3;
+        // if(fabs(error) < 10){
+        //     prev_error = error;
+        //     sprintf(msg, "Dentro de la banda de error!\n");
+        //     sys_print(msg);
+        //     pwm_state ? pwm_set_gpio_level(PIN_PWM,pwm) : pwm_set_gpio_level(PIN_PWM,0);
+        //     prev_time = get_absolute_time();   
+        //     continue;
+        // }
+
+        dt = (float)absolute_time_diff_us(prev_time, start_time);
 
         diferential_error = (error - prev_error)/dt;
 
         integral_error += error * dt;
 
-        if(integral_error>=4096.0/h){
+        if(fabs(integral_error)>=4096.0/h ){
             integral_error=4096.0/h;
         }
 
-        pid = error * pid_params.kp + integral_error * pid_params.ki;//+ diferential_error * kd + integral_error * ki;
+        if(fabs(diferential_error)>=10/h){
+            diferential_error=10/h;
+        }
+
+
+        if(pid_params.kd == 0){
+            pid = error * pid_params.kp + integral_error * pid_params.ki;
+        }else{
+            pid = error * pid_params.kp + integral_error * pid_params.ki + diferential_error * pid_params.kd;
+        }
 
         if(pid<0){
             pid = 0;
@@ -1138,7 +1113,13 @@ void control_task(void *params){
         // }
         
         // pwm_set_gpio_level(PIN_PWM,pwm);
-        pwm_state ? pwm_set_gpio_level(PIN_PWM,pwm) : pwm_set_gpio_level(PIN_PWM,0);
+        if(pwm_state) {
+            pwm_set_gpio_level(PIN_PWM,pwm);
+        }else{
+            pwm_set_gpio_level(PIN_PWM,0);
+            integral_error = 0;
+            diferential_error = 0;
+        }
         // pwm_set_gpio_level(PIN_PWM, 4095);
         // pwm_set_gpio_level(PIN_PWM,pwm);
 
@@ -1312,29 +1293,68 @@ int encoder_increment(encoder_t *encoder) {
 }
 
 int encoder_count(encoder_t *encoder) {
-    int increment = 0; // Valor de incremento basado en la velocidad de rotación
-    if(!encoder->clk && encoder->prev_clk) {
-        TickType_t now = xTaskGetTickCount();
+    
+    int increment = 0;
+    int change = 0; // Almacena el resultado de la FSM: -1 (CCW), 0 (sin cambio/rebote), +1 (CW)
 
-        // Filtro de debounce: solo aceptamos el flanco si ha pasado el tiempo mínimo
-        if((now - encoder->last_valid_edge) > encoder->debounce_time) {
-            encoder->last_valid_edge = now;
+    int current_clk = encoder->clk;
+    int current_dt = encoder->dt;
 
-            // Cálculo de velocidad (solo si es un flanco válido)
-            encoder->current_edge_time = now;
-            TickType_t rotation_period = encoder->current_edge_time - encoder->last_edge_time;
-            encoder->last_edge_time = encoder->current_edge_time;
-
-            // Cálculo del incremento basado en velocidad
-            if(rotation_period < pdMS_TO_TICKS(200)) increment = 50;
-            else if(rotation_period < pdMS_TO_TICKS(300)) increment = 20;
-            else if(rotation_period < pdMS_TO_TICKS(400)) increment = 10;
-            else increment = 1;
-
-            return increment * (encoder->dt ? 1 : -1); // Retorna el incremento o decremento según el estado del dt
+    // --- 1. Máquina de Estados Finitos (FSM) de Cuadratura ---
+    // Esta lógica detecta CADA transición (4 por "clic")
+    // y es inherentemente resistente al rebote (un rebote es +1 y luego -1, sumando 0).
+    
+    // Un cambio en CLK
+    if (current_clk != encoder->prev_clk) {
+        if (current_clk == 1) { // Flanco ascendente de CLK
+            change = (current_dt == 0) ? 1 : -1; // Dirección 1 (CW)
+        } else { // Flanco descendente de CLK
+            change = (current_dt == 1) ? 1 : -1; // Dirección 1 (CW)
+        }
+    } 
+    // Un cambio en DT (solo si CLK no cambió, para evitar doble conteo)
+    else if (current_dt != encoder->prev_dt) { 
+        if (current_dt == 1) { // Flanco ascendente de DT
+            change = (current_clk == 1) ? 1 : -1; // Dirección 1 (CW)
+        } else { // Flanco descendente de DT
+            change = (current_clk == 0) ? 1 : -1; // Dirección 1 (CW)
         }
     }
-    return 0;
+
+    // (Nota: Si la dirección está invertida, simplemente invierte los 1 y -1 en la lógica de 'change')
+
+    // --- 2. Actualización de Estados Anteriores ---
+    // Actualizamos los estados para la próxima vez que se llame a la función.
+    // Esto se hace siempre, incluso si fue un rebote.
+    encoder->prev_clk = current_clk;
+    encoder->prev_dt = current_dt;
+
+    // --- 3. Cálculo de Velocidad (Solo si hubo un paso válido) ---
+    
+    // Si 'change' es 0, significa que no hubo cambio de estado o
+    // los pines están en un estado "inválido" (ambos cambiaron a la vez).
+    if (change == 0) {
+        return 0;
+    }
+
+    // Si llegamos aquí, 'change' es +1 o -1 (un paso válido detectado)
+    TickType_t now = xTaskGetTickCount();
+    TickType_t rotation_period = now - encoder->last_valid_step_time;
+    encoder->last_valid_step_time = now; // Actualizamos el tiempo del último paso VÁLIDO
+
+    // --- 4. Asignación de Incremento (Basado en tu lógica original) ---
+    // Ajusta estos valores según la sensibilidad que desees
+    
+    if (rotation_period < pdMS_TO_TICKS(50)) { // Muy rápido
+        increment = 50;
+    } else if (rotation_period < pdMS_TO_TICKS(100)) { // Rápido
+        increment = 10;
+    } else { // Lento (o el primer movimiento)
+        increment = 1;
+    }
+
+    // Retornamos el incremento multiplicado por la dirección
+    return increment * change;
 }
 
 static uint32_t rtc_get_asbolute_seconds(ds1307_t *rtc){
@@ -1536,6 +1556,18 @@ void user_task(void *params) {
                 }
             }
 
+            if(user.menu == log_menu){
+                switch (user.select)
+                {
+                case 1:
+                    xSemaphoreGive(read_logs_event);
+                    break;
+                default:
+                    xSemaphoreGive(erase_logs_event);
+                    break;
+                }
+            }
+
             encoder_increment = 0;
 
             prev_set = set_user_event_count;
@@ -1545,9 +1577,9 @@ void user_task(void *params) {
             user.sp = user_view.sp_0;
 
             if(config_has_changed){
-                printf("NOW_RTC: %02d;%02d;%02d-%02d/%02d/%02d\n", now_rtc.time.hours, now_rtc.time.minutes, now_rtc.time.seconds, now_rtc.time.date, now_rtc.time.month, now_rtc.time.year);
-                printf("RTC: %02d;%02d;%02d-%02d/%02d/%02d\n", rtc.time.hours, rtc.time.minutes, rtc.time.seconds, rtc.time.date, rtc.time.month, rtc.time.year);
-                printf("USER: %02d;%02d;%02d-%02d/%02d/%02d\n", user.hour, user.minute, user.sencond, user.day, user.month, user.year);
+                // printf("NOW_RTC: %02d;%02d;%02d-%02d/%02d/%02d\n", now_rtc.time.hours, now_rtc.time.minutes, now_rtc.time.seconds, now_rtc.time.date, now_rtc.time.month, now_rtc.time.year);
+                // printf("RTC: %02d;%02d;%02d-%02d/%02d/%02d\n", rtc.time.hours, rtc.time.minutes, rtc.time.seconds, rtc.time.date, rtc.time.month, rtc.time.year);
+                // printf("USER: %02d;%02d;%02d-%02d/%02d/%02d\n", user.hour, user.minute, user.sencond, user.day, user.month, user.year);
                 xQueueSend(q_rtc_config, &now_rtc, portMAX_DELAY);
                 config_has_changed = false;
             }
@@ -1703,7 +1735,7 @@ void btns_task(void *params) {
 
     // Variables para debounce
     TickType_t last_valid_edge = 0;
-    const TickType_t debounce_time = pdMS_TO_TICKS(0); // Tiempo de debounce (10ms)
+    const TickType_t debounce_time = pdMS_TO_TICKS(100); // Tiempo de debounce (10ms)
 
     // Variables para calcular velocidad de rotación
     TickType_t last_edge_time = xTaskGetTickCount();
@@ -1737,7 +1769,8 @@ void btns_task(void *params) {
 
         user_increment = encoder_count(&encoder); // Llamo a la funcion que cuenta el encoder
         if(user_increment!=0) xQueueSend(encoder_event, &user_increment, portMAX_DELAY);
-        encoder.prev_clk = encoder.clk; // Guardo el estado anterior del clk
+        // encoder.prev_clk = encoder.clk; // Guardo el estado anterior del clk
+        // encoder.prev_dt = encoder.dt;
 
         if(!gpio_get(PIN_BTN)){
             xSemaphoreGive(change_event);
@@ -1762,29 +1795,62 @@ void btns_task(void *params) {
 #define FILE_SIZE 64*1024
 #define BUF_WRDS (1024 / sizeof(uint32_t))
 
+typedef struct {
+    float kp;
+    float ki;
+    float kd;
+    
+    uint16_t sp_0;
+    uint16_t sp_f;
+    uint16_t rise_time_ms;
+    uint16_t min;
+    uint16_t max;
+    
+} user_storage_t;
+
 static uint32_t buf[BUF_WRDS];
 static const char usr_config_file[] = "user.cfg";
 static const char log_file[] = "lux.log";
-static int16_t to_save_buff[5];
+static int16_t to_save_buff[8];
+static uint8_t to_read_buff[2*8];
 static int16_t log_to_save[7];
 static uint8_t log_to_read[2*7];
+user_storage_t user_to_storage;
 
 static void inline save_usr_params(user_t *f_user, lfs_t *lfs, lfs_file_t *file){
 
+    char msg[128];
+
     int err = lfs_file_open(lfs, file, usr_config_file, LFS_O_RDWR | LFS_O_CREAT);
+
+    control_params_t pid;
 
     if(err != LFS_ERR_OK){
         lfs_unmount(lfs);
         panic("failed to open file");
     }     
 
-    to_save_buff[0] = f_user->sp;
-    to_save_buff[1] = f_user->sp_f;
-    to_save_buff[2] = f_user->rise_time_ms;
-    to_save_buff[3] = f_user->min;
-    to_save_buff[4] = f_user->max;
+    sys_print("Guardado\n");
 
-    err = lfs_file_write(lfs, file, to_save_buff, sizeof(to_save_buff));
+    xQueuePeek(q_control_params, &pid, portMAX_DELAY);
+
+    user_to_storage.sp_0 = f_user->sp_0;
+
+    user_to_storage.sp_f = f_user->sp_f;
+
+    user_to_storage.rise_time_ms = f_user->rise_time_ms;
+
+    user_to_storage.min = f_user->min;
+
+    user_to_storage.max = f_user->max;
+
+    user_to_storage.kp = pid.kp;
+
+    user_to_storage.ki = pid.ki;
+
+    user_to_storage.kd = pid.kd;
+
+    err = lfs_file_write(lfs, file, &user_to_storage, sizeof(user_to_storage));
     
     if( err < LFS_ERR_OK){
         lfs_file_close(lfs, file);
@@ -1799,16 +1865,41 @@ static void inline save_usr_params(user_t *f_user, lfs_t *lfs, lfs_file_t *file)
     lfs_file_close(lfs, file);
 }
 
-static inline void read_usr_params(user_t *f_user, lfs_t *lfs, lfs_file_t *file){
+static inline void read_usr_params(lfs_t *lfs, lfs_file_t *file){
     
-    int err = lfs_file_open(lfs, file, log_file, LFS_O_RDWR | LFS_O_CREAT);
+    int err = lfs_file_open(lfs, file, usr_config_file, LFS_O_RDWR | LFS_O_CREAT);
 
     if(err != LFS_ERR_OK){
         lfs_unmount(lfs);
         panic("failed to open file");
     }     
 
-    err = lfs_file_read(lfs, file, to_save_buff, sizeof(to_save_buff));
+    err = lfs_file_read(lfs, file, &user_to_storage, sizeof(user_to_storage));
+
+    sys_print("Leido\n");
+
+    control_params_t pid;
+    char msg[128];
+    vTaskSuspend(user_task_handler);
+    user.sp_0 = user_to_storage.sp_0;
+    user.sp = user_to_storage.sp_0;
+    user.sp_f = user_to_storage.sp_f;
+    user.rise_time_ms = user_to_storage.rise_time_ms;
+    user.min = user_to_storage.min;
+    user.max = user_to_storage.max;
+    sprintf(msg, "setPoint: %d, setPointFinal: %d, riseTime: %d, min: %d, max: %d\n", user.sp_0, user.sp_f, user.rise_time_ms, user.min, user.max);
+    sys_print(msg);
+    vTaskResume(user_task_handler);
+    pid.kp = user_to_storage.kp;
+    pid.ki = user_to_storage.ki;
+    pid.kd = user_to_storage.kd;
+
+    xQueueSend(q_control, &user.sp, portMAX_DELAY);
+
+    sprintf(msg, "kp: %f, ki: %f, kd: %f\n", pid.kp, pid.ki, pid.kd);
+    sys_print(msg);
+
+    xQueueOverwrite(q_control_params, &pid);
 
     if(err < LFS_ERR_OK){
         lfs_file_close(lfs, file);
@@ -2009,6 +2100,7 @@ void storage_task(void *params) {
     lfs_t lfs;
     struct lfs_config *lfs_cfg;
     lfs_file_t file;
+    control_params_t pid;
 
     /* Near the beginning of your program initialize LFS */
 
@@ -2037,14 +2129,16 @@ void storage_task(void *params) {
     int log_cant;
     int log_count = 0;
 
+    read_usr_params(&lfs, &file);
+
     while(true){
         if(xQueueReceive(q_to_storage, &log, 0)){
-            sprintf(msg,"log:%d, lux:%u, time:%u/%u/%u-%u;%u;%u\n", 
-                   log_count, 
-                   log.lux, 
-                   log.time.date, log.time.month, log.time.year,
-                   log.time.hours, log.time.minutes, log.time.seconds);
-            sys_print(msg);
+            // sprintf(msg,"log:%d, lux:%u, time:%u/%u/%u-%u;%u;%u\n", 
+            //        log_count, 
+            //        log.lux, 
+            //        log.time.date, log.time.month, log.time.year,
+            //        log.time.hours, log.time.minutes, log.time.seconds);
+            // sys_print(msg);
             save_log(&log, &lfs, &file);
 
             log_count++;
@@ -2054,7 +2148,11 @@ void storage_task(void *params) {
             #endif
         }
         if(xSemaphoreTake(read_logs_event, 0) || xTaskNotifyWait(0, 0, &e,0)){
+            if(e == 0){
+                read_logs(&lfs, &file, 20);
+            }
             read_logs(&lfs, &file, e);
+            e = 0;
             // read_all_logs(&lfs, &file);
         }
         if(xQueueReceive(q_user_config, &user_config, 0)){
@@ -2062,12 +2160,10 @@ void storage_task(void *params) {
             #endif
             sprintf(msg,"setPoint: %d, setPointFinal: %d, riseTime: %d, min: %d, max: %d\n", user_config.sp_0, user_config.sp_f, user_config.rise_time_ms, user_config.min, user_config.max);
             sys_print(msg);
-
-            // save_usr_params(&user_config, &lfs, &file);
-
-            // vTaskDelay(200);
-
-            // read_usr_params(&user_config, &lfs, &file);
+            xQueuePeek(q_control_params, &pid, portMAX_DELAY);
+            sprintf(msg, "kp: %.2f, ki: %.2f, kd: %.2f\n", pid.kp, pid.ki, pid.kd);
+            sys_print(msg);
+            save_usr_params(&user_config, &lfs, &file);
 
             #if DEBUG_FLASH
             printf("USER READ: %d %d %d %d %d\n", user_config.sp, user_config.sp_f, user_config.rise_time_ms, user.min, user.max);
@@ -2219,7 +2315,7 @@ int main() {
     q_control = xQueueCreate(10, sizeof(float));
 
     q_rtc = xQueueCreate(5, sizeof(ds1307_t));
-    q_rtc_config = xQueueCreate(5, sizeof(ds1307_t));
+    q_rtc_config = xQueueCreate(1, sizeof(ds1307_t));
 
     q_to_storage = xQueueCreate(10, sizeof(log_t));
     q_user_config = xQueueCreate(10, sizeof(user_t));
@@ -2248,7 +2344,6 @@ int main() {
     toggle_control_event = xSemaphoreCreateBinary();
     read_logs_event = xSemaphoreCreateBinary();
     erase_logs_event = xSemaphoreCreateBinary();
-
 
     adc_config();
     i2c_config();
@@ -2325,7 +2420,6 @@ int main() {
         save_usr_params(&user);
     #endif
     // read_usr_params(&user);
-
     xTaskCreate(
         get_lux_task,
         "get_lux_task",
